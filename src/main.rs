@@ -801,10 +801,10 @@ fn watch_and_reinstall(
         spinner.start(format!("Clearing cache for {} package(s)...", to_clear.len()));
         pm::clear_cache(pm, &to_clear, consumer_dir);
 
-        spinner.start(format!("Running {} update...", style(pm.name()).green()));
-        match pm::run_update(pm, &to_clear, consumer_dir) {
-            Ok(()) => spinner.stop("Updated successfully"),
-            Err(e) => spinner.stop(format!("{}", style(format!("Update failed: {e}")).red())),
+        spinner.start(format!("Running {} install...", style(pm.name()).green()));
+        match pm::run_install(pm, consumer_dir) {
+            Ok(()) => spinner.stop("Installed successfully"),
+            Err(e) => spinner.stop(format!("{}", style(format!("Install failed: {e}")).red())),
         }
     }
 

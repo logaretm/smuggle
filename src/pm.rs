@@ -111,6 +111,40 @@ pub fn clear_cache(pm: PackageManager, packages: &[String], cwd: &Path) {
     }
 }
 
+/// Clear bundler/framework caches that might hold stale dependency artifacts.
+/// Detects which tools are in use and removes their cache directories.
+pub fn clear_bundler_caches(cwd: &Path) {
+    let caches: &[(&str, &str)] = &[
+        // Vite pre-bundles deps here
+        ("node_modules/.vite", "vite"),
+        // Next.js build cache
+        (".next/cache", "next.js"),
+        // Webpack / other tools using the common cache dir
+        ("node_modules/.cache", "webpack/tools"),
+    ];
+
+    for &(dir, label) in caches {
+        let path = cwd.join(dir);
+        if path.exists() {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {
+                    let _ = cliclack::log::remark(format!(
+                        "cleared {} cache ({})",
+                        style(label).dim(),
+                        style(dir).dim(),
+                    ));
+                }
+                Err(e) => {
+                    let _ = cliclack::log::warning(format!(
+                        "failed to clear {} cache: {e}",
+                        label,
+                    ));
+                }
+            }
+        }
+    }
+}
+
 pub fn run_install(pm: PackageManager, cwd: &Path) -> Result<(), String> {
     let status = Command::new(pm.name())
         .args(pm.install_args())

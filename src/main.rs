@@ -528,6 +528,7 @@ fn run_install_flow(
     let cache_spinner = cliclack::spinner();
     cache_spinner.start(format!("Clearing cache for {} package(s)...", all_names.len()));
     pm::clear_cache(pm, &all_names, install_dir);
+    pm::clear_bundler_caches(install_dir);
     cache_spinner.stop("Cache cleared");
 
     // Run install
@@ -800,6 +801,7 @@ fn watch_and_reinstall(
 
         spinner.start(format!("Clearing cache for {} package(s)...", to_clear.len()));
         pm::clear_cache(pm, &to_clear, consumer_dir);
+        pm::clear_bundler_caches(consumer_dir);
 
         spinner.start(format!("Running {} install...", style(pm.name()).green()));
         match pm::run_install(pm, consumer_dir) {

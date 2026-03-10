@@ -11,6 +11,8 @@ pub struct PublishPackageJson {
     pub name: Option<String>,
     pub version: Option<String>,
     #[serde(default)]
+    pub private: Option<bool>,
+    #[serde(default)]
     files: Option<Vec<String>>,
     #[serde(default)]
     dependencies: Option<HashMap<String, String>>,

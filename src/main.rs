@@ -2,6 +2,7 @@ mod pack;
 mod pm;
 mod registry;
 mod store;
+mod workspace;
 
 use clap::{Parser, Subcommand};
 use console::style;
@@ -36,6 +37,10 @@ enum Commands {
         /// Path to the package directory (defaults to current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
+
+        /// In a workspace, publish all non-private packages without prompting
+        #[arg(long)]
+        all: bool,
     },
 
     /// List all registered local packages
@@ -67,9 +72,9 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Publish { path }) => {
+        Some(Commands::Publish { path, all }) => {
             let pkg_dir = path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            if let Err(e) = cmd_publish(&pkg_dir) {
+            if let Err(e) = cmd_publish(&pkg_dir, all || cli.all) {
                 eprintln!("{} {e}", style("error:").red().bold());
                 std::process::exit(1);
             }
@@ -105,11 +110,21 @@ fn main() {
     }
 }
 
-fn cmd_publish(pkg_dir: &PathBuf) -> Result<(), String> {
+fn cmd_publish(pkg_dir: &PathBuf, select_all: bool) -> Result<(), String> {
     let pkg_dir = pkg_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
+    // Check for pnpm workspace
+    if let Some(workspace_packages) = workspace::detect_pnpm_workspace(&pkg_dir) {
+        return cmd_publish_workspace(&pkg_dir, workspace_packages, select_all);
+    }
+
+    // Single package publish
+    publish_single_package(&pkg_dir)
+}
+
+fn publish_single_package(pkg_dir: &std::path::Path) -> Result<(), String> {
     let pkg_json_path = pkg_dir.join("package.json");
     if !pkg_json_path.exists() {
         return Err("no package.json found in this directory".into());
@@ -138,9 +153,9 @@ fn cmd_publish(pkg_dir: &PathBuf) -> Result<(), String> {
     spinner.set_message(format!("Packing {}...", style(format!("{name}@{version}")).cyan()));
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-    let tarball = pack::pack(&pkg_dir, &pkg_json)?;
+    let tarball = pack::pack(pkg_dir, &pkg_json)?;
 
-    store::save(name, version, &pkg_dir, &tarball, &pkg_json.dependencies())?;
+    store::save(name, version, &pkg_dir.to_path_buf(), &tarball, &pkg_json.dependencies())?;
 
     spinner.finish_with_message(format!(
         "{} Published {} -> {}",
@@ -148,6 +163,109 @@ fn cmd_publish(pkg_dir: &PathBuf) -> Result<(), String> {
         style(format!("{name}@{version}")).cyan().bold(),
         style(format!("~/.smuggle/packages/{name}/")).dim(),
     ));
+
+    Ok(())
+}
+
+fn cmd_publish_workspace(
+    root: &std::path::Path,
+    packages: Vec<workspace::WorkspacePackage>,
+    select_all: bool,
+) -> Result<(), String> {
+    eprintln!("{} Detected pnpm workspace\n",
+        style("*").cyan().bold(),
+    );
+
+    if packages.is_empty() {
+        return Err("no packages found in workspace".into());
+    }
+
+    // Build display items
+    let selected_indices: Vec<usize> = if select_all {
+        // Select all non-private packages
+        let selected: Vec<usize> = packages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.is_private)
+            .map(|(i, _)| i)
+            .collect();
+
+        eprintln!("{} Selecting all {} publishable package(s)",
+            style("*").cyan().bold(),
+            style(selected.len()).bold(),
+        );
+
+        for &i in &selected {
+            let p = &packages[i];
+            let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
+            eprintln!("  {} {} {}",
+                style("|").dim(),
+                style(&p.name).cyan().bold(),
+                style(format!("@ {} ({})", p.version, rel.display())).dim(),
+            );
+        }
+
+        selected
+    } else {
+        let items: Vec<String> = packages
+            .iter()
+            .map(|p| {
+                let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
+                let suffix = if p.is_root { " (root)" } else { "" };
+                let private_tag = if p.is_private { " [private]" } else { "" };
+                format!("{} @ {} ({}){}{}", p.name, p.version, rel.display(), suffix, private_tag)
+            })
+            .collect();
+
+        // Default: select non-private packages
+        let defaults: Vec<bool> = packages.iter().map(|p| !p.is_private).collect();
+
+        let selections = dialoguer::MultiSelect::new()
+            .with_prompt("Select packages to publish")
+            .items(&items)
+            .defaults(&defaults)
+            .interact()
+            .map_err(|e| format!("selection cancelled: {e}"))?;
+
+        if selections.is_empty() {
+            eprintln!("{} No packages selected, nothing to do.", style("*").dim());
+            return Ok(());
+        }
+
+        selections
+    };
+
+    // Publish each selected package
+    let mut published = 0;
+    let mut errors = Vec::new();
+
+    for &idx in &selected_indices {
+        let pkg = &packages[idx];
+        match publish_single_package(&pkg.path) {
+            Ok(()) => published += 1,
+            Err(e) => {
+                eprintln!("  {} failed to publish {}: {e}",
+                    style("warn:").yellow(),
+                    style(&pkg.name).cyan(),
+                );
+                errors.push(pkg.name.clone());
+            }
+        }
+    }
+
+    eprintln!();
+    if errors.is_empty() {
+        eprintln!("{} Published {} package(s)",
+            style("*").green().bold(),
+            style(published).bold(),
+        );
+    } else {
+        eprintln!("{} Published {} package(s), {} failed",
+            style("*").yellow().bold(),
+            style(published).bold(),
+            style(errors.len()).red().bold(),
+        );
+    }
 
     Ok(())
 }
@@ -187,6 +305,11 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
+
+    // Detect pnpm workspace
+    if let Some(workspace_packages) = workspace::detect_pnpm_workspace(&consumer_dir) {
+        return cmd_install_workspace(&consumer_dir, workspace_packages, deep, select_all);
+    }
 
     let pkg_json_path = consumer_dir.join("package.json");
     if !pkg_json_path.exists() {
@@ -339,6 +462,201 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
 
     // Watch for changes
     watch_and_reinstall(&selected, &consumer_dir, pm, deep, &reverse_deps, &server)?;
+
+    // Cleanup on normal exit
+    restore_npmrc(&npmrc_path, original_npmrc.as_deref());
+    eprintln!("\n{} Cleaned up .npmrc", style("*").dim());
+
+    Ok(())
+}
+
+fn cmd_install_workspace(
+    root: &std::path::Path,
+    workspace_packages: Vec<workspace::WorkspacePackage>,
+    deep: bool,
+    select_all: bool,
+) -> Result<(), String> {
+    eprintln!("{} Detected pnpm workspace\n",
+        style("*").cyan().bold(),
+    );
+
+    let registered = store::list();
+    if registered.is_empty() {
+        return Err(
+            "no registered packages. publish some first with `smuggle publish`.".into(),
+        );
+    }
+
+    // Collect deps from all workspace packages and track which workspace pkg uses which proxied dep
+    let mut all_deps = std::collections::HashSet::new();
+    let mut workspace_dep_map: Vec<(String, Vec<String>)> = Vec::new(); // (workspace_pkg_name, [proxied_dep_names])
+
+    for wp in &workspace_packages {
+        let pkg_json_path = wp.path.join("package.json");
+        let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
+            continue;
+        };
+        let Ok(consumer_pkg) = serde_json::from_str::<pack::ConsumerPackageJson>(&raw) else {
+            continue;
+        };
+        let deps = consumer_pkg.all_dependency_names();
+        let matched: Vec<String> = registered
+            .iter()
+            .filter(|e| deps.contains(&e.name))
+            .map(|e| e.name.clone())
+            .collect();
+
+        if !matched.is_empty() {
+            all_deps.extend(matched.clone());
+            workspace_dep_map.push((wp.name.clone(), matched));
+        }
+    }
+
+    let mut matches: Vec<&store::StoreEntry> = registered
+        .iter()
+        .filter(|entry| all_deps.contains(&entry.name))
+        .collect();
+
+    if matches.is_empty() {
+        return Err(
+            "no registered packages found in any workspace package's dependencies. publish some first with `smuggle publish`."
+                .into(),
+        );
+    }
+
+    matches.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Show which workspace packages use which proxied deps
+    let selected: Vec<&store::StoreEntry> = if select_all {
+        eprintln!("{} Found {} proxied package(s) across {} workspace package(s)\n",
+            style("*").cyan().bold(),
+            style(matches.len()).bold(),
+            style(workspace_dep_map.len()).bold(),
+        );
+        for (wp_name, dep_names) in &workspace_dep_map {
+            eprintln!("  {} {}",
+                style("|").dim(),
+                style(wp_name).bold(),
+            );
+            for dep in dep_names {
+                eprintln!("    {} {}",
+                    style("|").dim(),
+                    style(dep).cyan(),
+                );
+            }
+        }
+        matches.clone()
+    } else {
+        let items: Vec<String> = matches
+            .iter()
+            .map(|e| format!("{} @ {} ({})", e.name, e.version, e.source_dir.display()))
+            .collect();
+
+        let defaults: Vec<bool> = vec![true; items.len()];
+
+        let selections = dialoguer::MultiSelect::new()
+            .with_prompt("Select packages to proxy locally")
+            .items(&items)
+            .defaults(&defaults)
+            .interact()
+            .map_err(|e| format!("selection cancelled: {e}"))?;
+
+        if selections.is_empty() {
+            eprintln!("{} No packages selected, nothing to do.", style("*").dim());
+            return Ok(());
+        }
+
+        selections.iter().map(|&i| matches[i]).collect()
+    };
+
+    let pm = pm::detect_package_manager(root);
+    eprintln!("\n{} Detected package manager: {}",
+        style("*").cyan().bold(),
+        style(pm.name()).green().bold(),
+    );
+
+    let reverse_deps = if deep {
+        build_reverse_dep_map(&selected)
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Start registry server
+    let registry_packages: Vec<registry::RegistryPackage> = selected
+        .iter()
+        .map(|entry| {
+            let tarball = store::load_tarball(&entry.name)
+                .unwrap_or_else(|e| panic!("failed to load tarball for {}: {e}", entry.name));
+            registry::RegistryPackage {
+                name: entry.name.clone(),
+                version: entry.version.clone(),
+                tarball,
+                dependencies: entry.dependencies.clone(),
+            }
+        })
+        .collect();
+
+    let server = registry::start(registry_packages)?;
+    let port = server.port;
+    eprintln!("{} Local registry started on port {}",
+        style("*").green().bold(),
+        style(port).cyan(),
+    );
+
+    // Backup and write .npmrc at workspace root
+    let npmrc_path = root.join(".npmrc");
+    let original_npmrc = if npmrc_path.exists() {
+        Some(std::fs::read_to_string(&npmrc_path).unwrap_or_default())
+    } else {
+        None
+    };
+
+    write_npmrc(&npmrc_path, port, &selected)?;
+
+    // Cleanup on ctrl-c
+    let cleanup_npmrc = npmrc_path.clone();
+    let cleanup_original = original_npmrc.clone();
+    let _ = ctrlc::set_handler(move || {
+        restore_npmrc(&cleanup_npmrc, cleanup_original.as_deref());
+        std::process::exit(0);
+    });
+
+    // Clear cache for selected packages
+    let selected_names: Vec<String> = selected.iter().map(|e| e.name.clone()).collect();
+    let mut to_clear = selected_names.clone();
+
+    if deep {
+        for name in &selected_names {
+            if let Some(dependents) = reverse_deps.get(name) {
+                for dep in dependents {
+                    if !to_clear.contains(dep) {
+                        to_clear.push(dep.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!("\n{} Clearing cache for {} package(s)...",
+        style("*").cyan().bold(),
+        style(to_clear.len()).bold(),
+    );
+    pm::clear_cache(pm, &to_clear, root);
+
+    // Run install at workspace root
+    eprintln!("\n{} Running {} install...",
+        style("*").cyan().bold(),
+        style(pm.name()).green().bold(),
+    );
+    pm::run_install(pm, root)?;
+
+    eprintln!("\n{} Watching for changes... {}\n",
+        style("*").green().bold(),
+        style("(ctrl-c to stop)").dim(),
+    );
+
+    // Watch for changes
+    watch_and_reinstall(&selected, root, pm, deep, &reverse_deps, &server)?;
 
     // Cleanup on normal exit
     restore_npmrc(&npmrc_path, original_npmrc.as_deref());

@@ -532,6 +532,196 @@ fn install_scoped_npmrc() {
     cleanup_store("@test-smug/scoped-a");
 }
 
+// ─── Workspace Install ──────────────────────────────────────
+
+fn create_pnpm_workspace(root: &Path, globs: &[&str]) {
+    fs::create_dir_all(root).unwrap();
+
+    let entries: Vec<String> = globs.iter().map(|g| format!("  - \"{g}\"")).collect();
+    let yaml = format!("packages:\n{}\n", entries.join("\n"));
+    fs::write(root.join("pnpm-workspace.yaml"), yaml).unwrap();
+
+    // Create a pnpm-lock.yaml so the PM is detected as pnpm
+    fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+}
+
+#[test]
+fn workspace_install_detects_proxied_deps() {
+    // Test that workspace install finds proxied packages across workspace members
+    let tmp = TempDir::new().unwrap();
+
+    // Publish a package first
+    let lib_dir = tmp.path().join("lib");
+    create_package(
+        &lib_dir,
+        "@test-smug/ws-lib",
+        "2.0.0",
+        &["dist"],
+        "",
+    );
+    let dist = lib_dir.join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(dist.join("index.js"), "module.exports = 'ws-lib';").unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&lib_dir)
+        .assert()
+        .success();
+
+    // Create a pnpm workspace with two apps
+    let ws_root = tmp.path().join("workspace");
+    create_pnpm_workspace(&ws_root, &["apps/*"]);
+
+    // Root package.json (required for workspace detection)
+    fs::write(
+        ws_root.join("package.json"),
+        r#"{"name": "test-workspace", "version": "1.0.0", "private": true}"#,
+    )
+    .unwrap();
+
+    // App that uses the proxied package
+    let app_a = ws_root.join("apps").join("app-a");
+    create_consumer(&app_a, &[("@test-smug/ws-lib", "^2.0.0")]);
+
+    // App that does NOT use any proxied package
+    let app_b = ws_root.join("apps").join("app-b");
+    create_consumer(&app_b, &[("some-other-pkg", "^1.0.0")]);
+
+    // Run install --all; it should detect workspace and find @test-smug/ws-lib
+    // used by app-a. It will fail at pnpm install (no real pnpm setup) but
+    // should get past the detection phase.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("smuggle"))
+        .args(["install", "--all", "--path"])
+        .arg(&ws_root)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    child.kill().unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("Detected pnpm workspace"),
+        "expected workspace detection, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("@test-smug/ws-lib"),
+        "expected proxied package in output, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Local registry started"),
+        "expected registry start, got: {stderr}"
+    );
+
+    cleanup_store("@test-smug/ws-lib");
+}
+
+#[test]
+fn workspace_install_no_matches() {
+    // Test that workspace install errors when no proxied packages match
+    let tmp = TempDir::new().unwrap();
+
+    let ws_root = tmp.path().join("workspace");
+    create_pnpm_workspace(&ws_root, &["apps/*"]);
+
+    fs::write(
+        ws_root.join("package.json"),
+        r#"{"name": "test-workspace", "version": "1.0.0", "private": true}"#,
+    )
+    .unwrap();
+
+    let app = ws_root.join("apps").join("app");
+    create_consumer(&app, &[("no-such-proxied-pkg", "^1.0.0")]);
+
+    smuggle()
+        .args(["install", "--all", "--path"])
+        .arg(&ws_root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no registered packages"));
+}
+
+#[test]
+fn workspace_install_multiple_apps_same_dep() {
+    // Test that when multiple workspace packages use the same proxied dep,
+    // it's only proxied once
+    let tmp = TempDir::new().unwrap();
+
+    // Publish
+    let lib_dir = tmp.path().join("lib");
+    create_package(
+        &lib_dir,
+        "@test-smug/ws-shared",
+        "1.0.0",
+        &["dist"],
+        "",
+    );
+    let dist = lib_dir.join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(dist.join("index.js"), "shared").unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&lib_dir)
+        .assert()
+        .success();
+
+    // Create workspace where both apps depend on the same proxied package
+    let ws_root = tmp.path().join("workspace");
+    create_pnpm_workspace(&ws_root, &["apps/*"]);
+
+    fs::write(
+        ws_root.join("package.json"),
+        r#"{"name": "test-workspace", "version": "1.0.0", "private": true}"#,
+    )
+    .unwrap();
+
+    let app_a = ws_root.join("apps").join("app-a");
+    fs::create_dir_all(&app_a).unwrap();
+    fs::write(
+        app_a.join("package.json"),
+        r#"{"name": "app-a", "version": "1.0.0", "dependencies": {"@test-smug/ws-shared": "^1.0.0"}}"#,
+    ).unwrap();
+
+    let app_b = ws_root.join("apps").join("app-b");
+    fs::create_dir_all(&app_b).unwrap();
+    fs::write(
+        app_b.join("package.json"),
+        r#"{"name": "app-b", "version": "1.0.0", "dependencies": {"@test-smug/ws-shared": "^1.0.0"}}"#,
+    ).unwrap();
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("smuggle"))
+        .args(["install", "--all", "--path"])
+        .arg(&ws_root)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    child.kill().unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should show both workspace packages using the dep
+    assert!(
+        stderr.contains("app-a") && stderr.contains("app-b"),
+        "expected both workspace packages in output, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("@test-smug/ws-shared"),
+        "expected proxied dep in output, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("Local registry started"),
+        "expected registry start, got: {stderr}"
+    );
+
+    cleanup_store("@test-smug/ws-shared");
+}
+
 // ─── Tarball helpers ────────────────────────────────────────
 
 fn list_tarball_entries(tarball: &[u8]) -> Vec<String> {

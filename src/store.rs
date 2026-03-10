@@ -13,7 +13,7 @@ fn pkg_dir(name: &str) -> PathBuf {
     store_dir().join(name)
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StoreEntry {
     pub name: String,
     pub version: String,

@@ -21,10 +21,6 @@ struct Cli {
     #[arg(short, long, global = true)]
     path: Option<PathBuf>,
 
-    /// Also clear cache for proxied packages that depend on other proxied packages
-    #[arg(long, global = true)]
-    deep: bool,
-
     /// Select all matching packages without prompting
     #[arg(long, global = true)]
     all: bool,
@@ -58,10 +54,6 @@ enum Commands {
         #[arg(short, long)]
         path: Option<PathBuf>,
 
-        /// Also clear cache for proxied packages that depend on other proxied packages
-        #[arg(long)]
-        deep: bool,
-
         /// Select all matching packages without prompting
         #[arg(long)]
         all: bool,
@@ -88,12 +80,11 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Commands::Install { path, deep, all }) => {
+        Some(Commands::Install { path, all }) => {
             let consumer_dir = path.or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
-            let deep = deep || cli.deep;
             let all = all || cli.all;
-            if let Err(e) = cmd_install(&consumer_dir, deep, all) {
+            if let Err(e) = cmd_install(&consumer_dir, all) {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
@@ -102,7 +93,7 @@ fn main() {
             // bare `smuggle` = `smuggle install`
             let consumer_dir = cli.path
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
-            if let Err(e) = cmd_install(&consumer_dir, cli.deep, cli.all) {
+            if let Err(e) = cmd_install(&consumer_dir, cli.all) {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
@@ -286,14 +277,14 @@ fn cmd_unpublish(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(), String> {
+fn cmd_install(consumer_dir: &PathBuf, select_all: bool) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
     // Detect pnpm workspace
     if let Some(workspace_packages) = workspace::detect_pnpm_workspace(&consumer_dir) {
-        return cmd_install_workspace(&consumer_dir, workspace_packages, deep, select_all);
+        return cmd_install_workspace(&consumer_dir, workspace_packages, select_all);
     }
 
     let pkg_json_path = consumer_dir.join("package.json");
@@ -360,13 +351,12 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(&consumer_dir, &selected, deep, select_all)
+    run_install_flow(&consumer_dir, &selected)
 }
 
 fn cmd_install_workspace(
     root: &std::path::Path,
     workspace_packages: Vec<workspace::WorkspacePackage>,
-    deep: bool,
     select_all: bool,
 ) -> Result<(), String> {
     let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
@@ -459,28 +449,41 @@ fn cmd_install_workspace(
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(root, &selected, deep, select_all)
+    run_install_flow(root, &selected)
 }
 
-/// Shared install flow: start registry, write .npmrc, clear cache, install, watch.
+/// Shared install flow: expand deps, start registry, write .npmrc, clear cache, install, watch.
 fn run_install_flow(
     install_dir: &std::path::Path,
     selected: &[&store::StoreEntry],
-    deep: bool,
-    _select_all: bool,
 ) -> Result<(), String> {
     let pm = pm::detect_package_manager(install_dir);
     cliclack::log::info(format!("Detected package manager: {}", style(pm.name()).green().bold()))
         .map_err(|e| e.to_string())?;
 
-    let reverse_deps = if deep {
-        build_reverse_dep_map(selected)
-    } else {
-        std::collections::HashMap::new()
-    };
+    // Expand: include registered transitive dependencies
+    let registered = store::list();
+    let all_entries = expand_with_registered_deps(selected, &registered);
+    let all_refs: Vec<&store::StoreEntry> = all_entries.iter().collect();
+
+    if all_refs.len() > selected.len() {
+        let extra: Vec<&str> = all_refs
+            .iter()
+            .filter(|e| !selected.iter().any(|s| s.name == e.name))
+            .map(|e| e.name.as_str())
+            .collect();
+        cliclack::log::info(format!(
+            "Also watching {} transitive dep(s): {}",
+            extra.len(),
+            extra.iter().map(|n| style(n).cyan().to_string()).collect::<Vec<_>>().join(", "),
+        )).map_err(|e| e.to_string())?;
+    }
+
+    // Build reverse dep map (always — so dependents get cache-cleared on change)
+    let reverse_deps = build_reverse_dep_map(&all_refs);
 
     // Start registry server
-    let registry_packages: Vec<registry::RegistryPackage> = selected
+    let registry_packages: Vec<registry::RegistryPackage> = all_refs
         .iter()
         .map(|entry| {
             let tarball = store::load_tarball(&entry.name)
@@ -509,7 +512,7 @@ fn run_install_flow(
         None
     };
 
-    write_npmrc(&npmrc_path, port, selected)?;
+    write_npmrc(&npmrc_path, port, &all_refs)?;
 
     // Cleanup on ctrl-c
     let cleanup_npmrc = npmrc_path.clone();
@@ -519,25 +522,12 @@ fn run_install_flow(
         std::process::exit(0);
     });
 
-    // Clear cache for selected packages
-    let selected_names: Vec<String> = selected.iter().map(|e| e.name.clone()).collect();
-    let mut to_clear = selected_names.clone();
-
-    if deep {
-        for name in &selected_names {
-            if let Some(dependents) = reverse_deps.get(name) {
-                for dep in dependents {
-                    if !to_clear.contains(dep) {
-                        to_clear.push(dep.clone());
-                    }
-                }
-            }
-        }
-    }
+    // Clear cache for all proxied packages
+    let all_names: Vec<String> = all_refs.iter().map(|e| e.name.clone()).collect();
 
     let cache_spinner = cliclack::spinner();
-    cache_spinner.start(format!("Clearing cache for {} package(s)...", to_clear.len()));
-    pm::clear_cache(pm, &to_clear, install_dir);
+    cache_spinner.start(format!("Clearing cache for {} package(s)...", all_names.len()));
+    pm::clear_cache(pm, &all_names, install_dir);
     cache_spinner.stop("Cache cleared");
 
     // Run install
@@ -549,13 +539,49 @@ fn run_install_flow(
         .map_err(|e| e.to_string())?;
 
     // Watch for changes
-    watch_and_reinstall(selected, install_dir, pm, deep, &reverse_deps, &server)?;
+    watch_and_reinstall(&all_refs, install_dir, pm, &reverse_deps, &server)?;
 
     // Cleanup on normal exit
     restore_npmrc(&npmrc_path, original_npmrc.as_deref());
     let _ = cliclack::outro("Cleaned up .npmrc");
 
     Ok(())
+}
+
+/// Expand the selected set to include any registered packages that are
+/// transitive dependencies of the selected packages.
+fn expand_with_registered_deps(
+    selected: &[&store::StoreEntry],
+    registered: &[store::StoreEntry],
+) -> Vec<store::StoreEntry> {
+    let registered_names: std::collections::HashSet<String> =
+        registered.iter().map(|e| e.name.clone()).collect();
+
+    let mut included: std::collections::HashSet<String> =
+        selected.iter().map(|e| e.name.clone()).collect();
+
+    // BFS to find transitive registered deps
+    let mut queue: Vec<String> = included.iter().cloned().collect();
+    while let Some(name) = queue.pop() {
+        let Some(entry) = registered.iter().find(|e| e.name == name) else {
+            continue;
+        };
+        for dep_name in entry.dependencies.keys() {
+            if registered_names.contains(dep_name) && !included.contains(dep_name) {
+                included.insert(dep_name.clone());
+                queue.push(dep_name.clone());
+            }
+        }
+    }
+
+    // Collect the full entries in a stable order
+    let mut result: Vec<store::StoreEntry> = registered
+        .iter()
+        .filter(|e| included.contains(&e.name))
+        .cloned()
+        .collect();
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    result
 }
 
 fn build_reverse_dep_map(
@@ -632,7 +658,6 @@ fn watch_and_reinstall(
     selected: &[&store::StoreEntry],
     consumer_dir: &std::path::Path,
     pm: pm::PackageManager,
-    deep: bool,
     reverse_deps: &std::collections::HashMap<String, Vec<String>>,
     server: &registry::Server,
 ) -> Result<(), String> {
@@ -658,10 +683,26 @@ fn watch_and_reinstall(
         .map_err(|e| format!("failed to create watcher: {e}"))?;
 
     for entry in selected {
-        watcher
-            .watch(&entry.source_dir, RecursiveMode::Recursive)
-            .map_err(|e| format!("failed to watch {}: {e}", entry.source_dir.display()))?;
-        let _ = cliclack::log::remark(format!("watching {}", style(entry.source_dir.display()).dim()));
+        let watch_dirs = resolve_watch_dirs(&entry.source_dir);
+        for dir in &watch_dirs {
+            watcher
+                .watch(dir, RecursiveMode::Recursive)
+                .map_err(|e| format!("failed to watch {}: {e}", dir.display()))?;
+        }
+        let display_dirs: Vec<String> = watch_dirs
+            .iter()
+            .map(|d| {
+                d.strip_prefix(&entry.source_dir)
+                    .unwrap_or(d)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        let _ = cliclack::log::remark(format!(
+            "{} -> {}",
+            style(&entry.name).dim(),
+            style(display_dirs.join(", ")).dim(),
+        ));
     }
 
     let batch_window = Duration::from_secs(5);
@@ -745,15 +786,13 @@ fn watch_and_reinstall(
             }
         }
 
-        // Cache clear
+        // Cache clear — always include dependents of changed packages
         let mut to_clear = changed_packages.clone();
-        if deep {
-            for name in &changed_packages {
-                if let Some(dependents) = reverse_deps.get(name) {
-                    for dep in dependents {
-                        if !to_clear.contains(dep) {
-                            to_clear.push(dep.clone());
-                        }
+        for name in &changed_packages {
+            if let Some(dependents) = reverse_deps.get(name) {
+                for dep in dependents {
+                    if !to_clear.contains(dep) {
+                        to_clear.push(dep.clone());
                     }
                 }
             }
@@ -770,6 +809,80 @@ fn watch_and_reinstall(
     }
 
     Ok(())
+}
+
+/// Determine which directories to watch for a package.
+/// If the package.json has a `files` field, watch only those directories.
+/// Otherwise, watch the entire package root (package.json changes, etc.).
+fn resolve_watch_dirs(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
+    let pkg_json_path = pkg_dir.join("package.json");
+    let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
+        return vec![pkg_dir.to_path_buf()];
+    };
+    let Ok(pkg_json) = serde_json::from_str::<pack::PublishPackageJson>(&raw) else {
+        return vec![pkg_dir.to_path_buf()];
+    };
+
+    let Some(files) = pkg_json.files_list() else {
+        // No files field — watch the whole package root
+        return vec![pkg_dir.to_path_buf()];
+    };
+
+    let mut dirs = Vec::new();
+
+    // Always watch package.json itself (it's in the pack output)
+    // We watch the parent dir non-recursively for this, but since we can't
+    // do per-file watches easily, we collect the unique directories.
+    dirs.push(pkg_dir.to_path_buf());
+
+    for pattern in files {
+        // Strip glob suffixes to get the base directory
+        let clean: &str = pattern
+            .trim_start_matches('/')
+            .trim_end_matches("/**")
+            .trim_end_matches("/*")
+            .trim_end_matches('/');
+
+        // Strip anything after first glob character to get the base
+        let base = if let Some(pos) = clean.find('*') {
+            clean[..pos].trim_end_matches('/')
+        } else {
+            clean
+        };
+
+        if base.is_empty() {
+            dirs.push(pkg_dir.to_path_buf());
+            continue;
+        }
+
+        let abs = pkg_dir.join(base);
+        if abs.is_dir() {
+            dirs.push(abs);
+        } else if abs.is_file() {
+            // For individual files, watch the parent directory
+            if let Some(parent) = abs.parent() {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+        // If the path doesn't exist yet, skip — it'll appear after a build
+    }
+
+    // Deduplicate
+    dirs.sort();
+    dirs.dedup();
+
+    // Remove subdirectories if a parent is already watched
+    let mut filtered = Vec::new();
+    for dir in &dirs {
+        let dominated = filtered.iter().any(|parent: &PathBuf| dir.starts_with(parent) && dir != parent);
+        if !dominated {
+            // Also remove any existing entries that this new dir is a parent of
+            filtered.retain(|existing: &PathBuf| !existing.starts_with(dir) || existing == dir);
+            filtered.push(dir.clone());
+        }
+    }
+
+    filtered
 }
 
 fn is_ignored_path(path: &std::path::Path, source_root: &std::path::Path) -> bool {

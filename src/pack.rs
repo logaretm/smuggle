@@ -35,6 +35,11 @@ pub struct PublishPackageJson {
 }
 
 impl PublishPackageJson {
+    /// Return the `files` field patterns, if present.
+    pub fn files_list(&self) -> Option<&Vec<String>> {
+        self.files.as_ref()
+    }
+
     pub fn dependencies(&self) -> HashMap<String, String> {
         let mut deps = HashMap::new();
         if let Some(d) = &self.dependencies {

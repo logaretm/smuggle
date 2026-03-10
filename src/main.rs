@@ -75,7 +75,7 @@ fn main() {
         Some(Commands::Publish { path, all }) => {
             let pkg_dir = path.unwrap_or_else(|| std::env::current_dir().unwrap());
             if let Err(e) = cmd_publish(&pkg_dir, all || cli.all) {
-                eprintln!("{} {e}", style("error:").red().bold());
+                let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
         }
@@ -84,7 +84,7 @@ fn main() {
         }
         Some(Commands::Unpublish { name }) => {
             if let Err(e) = cmd_unpublish(&name) {
-                eprintln!("{} {e}", style("error:").red().bold());
+                let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
         }
@@ -94,7 +94,7 @@ fn main() {
             let deep = deep || cli.deep;
             let all = all || cli.all;
             if let Err(e) = cmd_install(&consumer_dir, deep, all) {
-                eprintln!("{} {e}", style("error:").red().bold());
+                let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
         }
@@ -103,7 +103,7 @@ fn main() {
             let consumer_dir = cli.path
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             if let Err(e) = cmd_install(&consumer_dir, cli.deep, cli.all) {
-                eprintln!("{} {e}", style("error:").red().bold());
+                let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
         }
@@ -144,24 +144,16 @@ fn publish_single_package(pkg_dir: &std::path::Path) -> Result<(), String> {
         .as_ref()
         .ok_or("package.json missing 'version' field")?;
 
-    let spinner = indicatif::ProgressBar::new_spinner();
-    spinner.set_style(
-        indicatif::ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg}")
-            .unwrap(),
-    );
-    spinner.set_message(format!("Packing {}...", style(format!("{name}@{version}")).cyan()));
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    let spinner = cliclack::spinner();
+    spinner.start(format!("Packing {name}@{version}..."));
 
     let tarball = pack::pack(pkg_dir, &pkg_json)?;
 
     store::save(name, version, &pkg_dir.to_path_buf(), &tarball, &pkg_json.dependencies())?;
 
-    spinner.finish_with_message(format!(
-        "{} Published {} -> {}",
-        style("*").green().bold(),
-        style(format!("{name}@{version}")).cyan().bold(),
-        style(format!("~/.smuggle/packages/{name}/")).dim(),
+    spinner.stop(format!(
+        "Published {} -> ~/.smuggle/packages/{name}/",
+        style(format!("{name}@{version}")).cyan(),
     ));
 
     Ok(())
@@ -172,17 +164,15 @@ fn cmd_publish_workspace(
     packages: Vec<workspace::WorkspacePackage>,
     select_all: bool,
 ) -> Result<(), String> {
-    eprintln!("{} Detected pnpm workspace\n",
-        style("*").cyan().bold(),
-    );
+    let _ = cliclack::intro(style(" smuggle publish ").on_cyan().black());
+
+    cliclack::log::info("Detected pnpm workspace").map_err(|e| e.to_string())?;
 
     if packages.is_empty() {
         return Err("no packages found in workspace".into());
     }
 
-    // Build display items
     let selected_indices: Vec<usize> = if select_all {
-        // Select all non-private packages
         let selected: Vec<usize> = packages
             .iter()
             .enumerate()
@@ -190,45 +180,47 @@ fn cmd_publish_workspace(
             .map(|(i, _)| i)
             .collect();
 
-        eprintln!("{} Selecting all {} publishable package(s)",
-            style("*").cyan().bold(),
-            style(selected.len()).bold(),
-        );
-
-        for &i in &selected {
-            let p = &packages[i];
-            let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
-            eprintln!("  {} {} {}",
-                style("|").dim(),
-                style(&p.name).cyan().bold(),
-                style(format!("@ {} ({})", p.version, rel.display())).dim(),
-            );
-        }
-
-        selected
-    } else {
-        let items: Vec<String> = packages
+        let list: Vec<String> = selected
             .iter()
-            .map(|p| {
+            .map(|&i| {
+                let p = &packages[i];
                 let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
-                let suffix = if p.is_root { " (root)" } else { "" };
-                let private_tag = if p.is_private { " [private]" } else { "" };
-                format!("{} @ {} ({}){}{}", p.name, p.version, rel.display(), suffix, private_tag)
+                format!("{} @ {} ({})", style(&p.name).cyan(), p.version, rel.display())
             })
             .collect();
 
-        // Default: select non-private packages
-        let defaults: Vec<bool> = packages.iter().map(|p| !p.is_private).collect();
+        cliclack::log::info(format!(
+            "Selecting all {} publishable package(s)\n{}",
+            selected.len(),
+            list.join("\n"),
+        )).map_err(|e| e.to_string())?;
 
-        let selections = dialoguer::MultiSelect::new()
-            .with_prompt("Select packages to publish")
-            .items(&items)
-            .defaults(&defaults)
+        selected
+    } else {
+        let mut prompt = cliclack::multiselect("Select packages to publish");
+
+        for (i, p) in packages.iter().enumerate() {
+            let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
+            let suffix = if p.is_root { " (root)" } else { "" };
+            let private_tag = if p.is_private { " [private]" } else { "" };
+            let label = format!("{} @ {} ({}){}{}", p.name, p.version, rel.display(), suffix, private_tag);
+            prompt = prompt.item(i, label, "");
+        }
+
+        let defaults: Vec<usize> = packages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.is_private)
+            .map(|(i, _)| i)
+            .collect();
+        prompt = prompt.initial_values(defaults);
+
+        let selections: Vec<usize> = prompt
             .interact()
             .map_err(|e| format!("selection cancelled: {e}"))?;
 
         if selections.is_empty() {
-            eprintln!("{} No packages selected, nothing to do.", style("*").dim());
+            let _ = cliclack::outro("No packages selected, nothing to do.");
             return Ok(());
         }
 
@@ -244,27 +236,21 @@ fn cmd_publish_workspace(
         match publish_single_package(&pkg.path) {
             Ok(()) => published += 1,
             Err(e) => {
-                eprintln!("  {} failed to publish {}: {e}",
-                    style("warn:").yellow(),
-                    style(&pkg.name).cyan(),
-                );
+                cliclack::log::warning(format!("Failed to publish {}: {e}", pkg.name))
+                    .map_err(|e| e.to_string())?;
                 errors.push(pkg.name.clone());
             }
         }
     }
 
-    eprintln!();
     if errors.is_empty() {
-        eprintln!("{} Published {} package(s)",
-            style("*").green().bold(),
-            style(published).bold(),
-        );
+        let _ = cliclack::outro(format!("Published {} package(s)", style(published).green().bold()));
     } else {
-        eprintln!("{} Published {} package(s), {} failed",
-            style("*").yellow().bold(),
-            style(published).bold(),
+        let _ = cliclack::outro(format!(
+            "Published {} package(s), {} failed",
+            style(published).green().bold(),
             style(errors.len()).red().bold(),
-        );
+        ));
     }
 
     Ok(())
@@ -273,31 +259,30 @@ fn cmd_publish_workspace(
 fn cmd_list() {
     let packages = store::list();
     if packages.is_empty() {
-        eprintln!("{} No packages registered. Run {} in a package directory first.",
-            style("*").dim(),
+        let _ = cliclack::log::info(format!(
+            "No packages registered. Run {} in a package directory first.",
             style("smuggle publish").cyan(),
-        );
+        ));
         return;
     }
 
-    eprintln!("{}\n", style("Registered packages:").bold());
-    for entry in packages {
-        eprintln!(
-            "  {} {} {} {}",
-            style("*").green(),
+    let _ = cliclack::intro(style(" smuggle list ").on_cyan().black());
+
+    for entry in &packages {
+        let _ = cliclack::log::info(format!(
+            "{} {} {}",
             style(&entry.name).cyan().bold(),
             style(format!("@ {}", entry.version)).dim(),
             style(format!("({})", entry.source_dir.display())).dim(),
-        );
+        ));
     }
+
+    let _ = cliclack::outro(format!("{} package(s) registered", packages.len()));
 }
 
 fn cmd_unpublish(name: &str) -> Result<(), String> {
     store::remove(name)?;
-    eprintln!("{} Removed {} from local store",
-        style("*").green().bold(),
-        style(name).cyan().bold(),
-    );
+    let _ = cliclack::log::success(format!("Removed {} from local store", style(name).cyan()));
     Ok(())
 }
 
@@ -315,6 +300,8 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
     if !pkg_json_path.exists() {
         return Err("no package.json found in consumer directory".into());
     }
+
+    let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
 
     let consumer_pkg: pack::ConsumerPackageJson = serde_json::from_str(
         &std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?,
@@ -339,135 +326,41 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
     matches.sort_by(|a, b| a.name.cmp(&b.name));
 
     let selected: Vec<&store::StoreEntry> = if select_all {
-        eprintln!("{} Selecting all {} matching package(s)",
-            style("*").cyan().bold(),
-            style(matches.len()).bold(),
-        );
-        for e in &matches {
-            eprintln!("  {} {} {}",
-                style("|").dim(),
-                style(&e.name).cyan().bold(),
-                style(format!("@ {} ({})", e.version, e.source_dir.display())).dim(),
-            );
-        }
+        let list: Vec<String> = matches
+            .iter()
+            .map(|e| format!("{} @ {} ({})", style(&e.name).cyan(), e.version, e.source_dir.display()))
+            .collect();
+        cliclack::log::info(format!(
+            "Selecting all {} matching package(s)\n{}",
+            matches.len(),
+            list.join("\n"),
+        )).map_err(|e| e.to_string())?;
         matches.clone()
     } else {
-        let items: Vec<String> = matches
-            .iter()
-            .map(|e| format!("{} @ {} ({})", e.name, e.version, e.source_dir.display()))
-            .collect();
+        let mut prompt = cliclack::multiselect("Select packages to proxy locally");
 
-        let defaults: Vec<bool> = vec![true; items.len()];
+        for (i, e) in matches.iter().enumerate() {
+            let label = format!("{} @ {}", e.name, e.version);
+            let hint = e.source_dir.display().to_string();
+            prompt = prompt.item(i, label, hint);
+        }
 
-        let selections = dialoguer::MultiSelect::new()
-            .with_prompt("Select packages to proxy locally")
-            .items(&items)
-            .defaults(&defaults)
+        let all_indices: Vec<usize> = (0..matches.len()).collect();
+        prompt = prompt.initial_values(all_indices);
+
+        let selections: Vec<usize> = prompt
             .interact()
             .map_err(|e| format!("selection cancelled: {e}"))?;
 
         if selections.is_empty() {
-            eprintln!("{} No packages selected, nothing to do.", style("*").dim());
+            let _ = cliclack::outro("No packages selected, nothing to do.");
             return Ok(());
         }
 
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    let pm = pm::detect_package_manager(&consumer_dir);
-    eprintln!("\n{} Detected package manager: {}",
-        style("*").cyan().bold(),
-        style(pm.name()).green().bold(),
-    );
-
-    let reverse_deps = if deep {
-        build_reverse_dep_map(&selected)
-    } else {
-        std::collections::HashMap::new()
-    };
-
-    // Start registry server
-    let registry_packages: Vec<registry::RegistryPackage> = selected
-        .iter()
-        .map(|entry| {
-            let tarball = store::load_tarball(&entry.name)
-                .unwrap_or_else(|e| panic!("failed to load tarball for {}: {e}", entry.name));
-            registry::RegistryPackage {
-                name: entry.name.clone(),
-                version: entry.version.clone(),
-                tarball,
-                dependencies: entry.dependencies.clone(),
-            }
-        })
-        .collect();
-
-    let server = registry::start(registry_packages)?;
-    let port = server.port;
-    eprintln!("{} Local registry started on port {}",
-        style("*").green().bold(),
-        style(port).cyan(),
-    );
-
-    // Backup and write .npmrc
-    let npmrc_path = consumer_dir.join(".npmrc");
-    let original_npmrc = if npmrc_path.exists() {
-        Some(std::fs::read_to_string(&npmrc_path).unwrap_or_default())
-    } else {
-        None
-    };
-
-    write_npmrc(&npmrc_path, port, &selected)?;
-
-    // Cleanup on ctrl-c
-    let cleanup_npmrc = npmrc_path.clone();
-    let cleanup_original = original_npmrc.clone();
-    let _ = ctrlc::set_handler(move || {
-        restore_npmrc(&cleanup_npmrc, cleanup_original.as_deref());
-        std::process::exit(0);
-    });
-
-    // Clear cache for selected packages
-    let selected_names: Vec<String> = selected.iter().map(|e| e.name.clone()).collect();
-    let mut to_clear = selected_names.clone();
-
-    if deep {
-        for name in &selected_names {
-            if let Some(dependents) = reverse_deps.get(name) {
-                for dep in dependents {
-                    if !to_clear.contains(dep) {
-                        to_clear.push(dep.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    eprintln!("\n{} Clearing cache for {} package(s)...",
-        style("*").cyan().bold(),
-        style(to_clear.len()).bold(),
-    );
-    pm::clear_cache(pm, &to_clear, &consumer_dir);
-
-    // Run install
-    eprintln!("\n{} Running {} install...",
-        style("*").cyan().bold(),
-        style(pm.name()).green().bold(),
-    );
-    pm::run_install(pm, &consumer_dir)?;
-
-    eprintln!("\n{} Watching for changes... {}\n",
-        style("*").green().bold(),
-        style("(ctrl-c to stop)").dim(),
-    );
-
-    // Watch for changes
-    watch_and_reinstall(&selected, &consumer_dir, pm, deep, &reverse_deps, &server)?;
-
-    // Cleanup on normal exit
-    restore_npmrc(&npmrc_path, original_npmrc.as_deref());
-    eprintln!("\n{} Cleaned up .npmrc", style("*").dim());
-
-    Ok(())
+    run_install_flow(&consumer_dir, &selected, deep, select_all)
 }
 
 fn cmd_install_workspace(
@@ -476,9 +369,9 @@ fn cmd_install_workspace(
     deep: bool,
     select_all: bool,
 ) -> Result<(), String> {
-    eprintln!("{} Detected pnpm workspace\n",
-        style("*").cyan().bold(),
-    );
+    let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
+
+    cliclack::log::info("Detected pnpm workspace").map_err(|e| e.to_string())?;
 
     let registered = store::list();
     if registered.is_empty() {
@@ -489,7 +382,7 @@ fn cmd_install_workspace(
 
     // Collect deps from all workspace packages and track which workspace pkg uses which proxied dep
     let mut all_deps = std::collections::HashSet::new();
-    let mut workspace_dep_map: Vec<(String, Vec<String>)> = Vec::new(); // (workspace_pkg_name, [proxied_dep_names])
+    let mut workspace_dep_map: Vec<(String, Vec<String>)> = Vec::new();
 
     for wp in &workspace_packages {
         let pkg_json_path = wp.path.join("package.json");
@@ -528,55 +421,60 @@ fn cmd_install_workspace(
 
     // Show which workspace packages use which proxied deps
     let selected: Vec<&store::StoreEntry> = if select_all {
-        eprintln!("{} Found {} proxied package(s) across {} workspace package(s)\n",
-            style("*").cyan().bold(),
-            style(matches.len()).bold(),
-            style(workspace_dep_map.len()).bold(),
-        );
+        let mut lines = Vec::new();
         for (wp_name, dep_names) in &workspace_dep_map {
-            eprintln!("  {} {}",
-                style("|").dim(),
-                style(wp_name).bold(),
-            );
+            lines.push(format!("{}:", style(wp_name).bold()));
             for dep in dep_names {
-                eprintln!("    {} {}",
-                    style("|").dim(),
-                    style(dep).cyan(),
-                );
+                lines.push(format!("  {}", style(dep).cyan()));
             }
         }
+        cliclack::log::info(format!(
+            "Found {} proxied package(s) across {} workspace package(s)\n{}",
+            matches.len(),
+            workspace_dep_map.len(),
+            lines.join("\n"),
+        )).map_err(|e| e.to_string())?;
         matches.clone()
     } else {
-        let items: Vec<String> = matches
-            .iter()
-            .map(|e| format!("{} @ {} ({})", e.name, e.version, e.source_dir.display()))
-            .collect();
+        let mut prompt = cliclack::multiselect("Select packages to proxy locally");
 
-        let defaults: Vec<bool> = vec![true; items.len()];
+        for (i, e) in matches.iter().enumerate() {
+            let label = format!("{} @ {}", e.name, e.version);
+            let hint = e.source_dir.display().to_string();
+            prompt = prompt.item(i, label, hint);
+        }
 
-        let selections = dialoguer::MultiSelect::new()
-            .with_prompt("Select packages to proxy locally")
-            .items(&items)
-            .defaults(&defaults)
+        let all_indices: Vec<usize> = (0..matches.len()).collect();
+        prompt = prompt.initial_values(all_indices);
+
+        let selections: Vec<usize> = prompt
             .interact()
             .map_err(|e| format!("selection cancelled: {e}"))?;
 
         if selections.is_empty() {
-            eprintln!("{} No packages selected, nothing to do.", style("*").dim());
+            let _ = cliclack::outro("No packages selected, nothing to do.");
             return Ok(());
         }
 
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    let pm = pm::detect_package_manager(root);
-    eprintln!("\n{} Detected package manager: {}",
-        style("*").cyan().bold(),
-        style(pm.name()).green().bold(),
-    );
+    run_install_flow(root, &selected, deep, select_all)
+}
+
+/// Shared install flow: start registry, write .npmrc, clear cache, install, watch.
+fn run_install_flow(
+    install_dir: &std::path::Path,
+    selected: &[&store::StoreEntry],
+    deep: bool,
+    _select_all: bool,
+) -> Result<(), String> {
+    let pm = pm::detect_package_manager(install_dir);
+    cliclack::log::info(format!("Detected package manager: {}", style(pm.name()).green().bold()))
+        .map_err(|e| e.to_string())?;
 
     let reverse_deps = if deep {
-        build_reverse_dep_map(&selected)
+        build_reverse_dep_map(selected)
     } else {
         std::collections::HashMap::new()
     };
@@ -598,20 +496,20 @@ fn cmd_install_workspace(
 
     let server = registry::start(registry_packages)?;
     let port = server.port;
-    eprintln!("{} Local registry started on port {}",
-        style("*").green().bold(),
-        style(port).cyan(),
-    );
 
-    // Backup and write .npmrc at workspace root
-    let npmrc_path = root.join(".npmrc");
+    let spinner = cliclack::spinner();
+    spinner.start("Starting local registry...");
+    spinner.stop(format!("Local registry started on port {}", style(port).cyan()));
+
+    // Backup and write .npmrc
+    let npmrc_path = install_dir.join(".npmrc");
     let original_npmrc = if npmrc_path.exists() {
         Some(std::fs::read_to_string(&npmrc_path).unwrap_or_default())
     } else {
         None
     };
 
-    write_npmrc(&npmrc_path, port, &selected)?;
+    write_npmrc(&npmrc_path, port, selected)?;
 
     // Cleanup on ctrl-c
     let cleanup_npmrc = npmrc_path.clone();
@@ -637,30 +535,25 @@ fn cmd_install_workspace(
         }
     }
 
-    eprintln!("\n{} Clearing cache for {} package(s)...",
-        style("*").cyan().bold(),
-        style(to_clear.len()).bold(),
-    );
-    pm::clear_cache(pm, &to_clear, root);
+    let cache_spinner = cliclack::spinner();
+    cache_spinner.start(format!("Clearing cache for {} package(s)...", to_clear.len()));
+    pm::clear_cache(pm, &to_clear, install_dir);
+    cache_spinner.stop("Cache cleared");
 
-    // Run install at workspace root
-    eprintln!("\n{} Running {} install...",
-        style("*").cyan().bold(),
-        style(pm.name()).green().bold(),
-    );
-    pm::run_install(pm, root)?;
+    // Run install
+    cliclack::log::step(format!("Running {} install...", style(pm.name()).green()))
+        .map_err(|e| e.to_string())?;
+    pm::run_install(pm, install_dir)?;
 
-    eprintln!("\n{} Watching for changes... {}\n",
-        style("*").green().bold(),
-        style("(ctrl-c to stop)").dim(),
-    );
+    cliclack::log::success(format!("Watching for changes... {}", style("(ctrl-c to stop)").dim()))
+        .map_err(|e| e.to_string())?;
 
     // Watch for changes
-    watch_and_reinstall(&selected, root, pm, deep, &reverse_deps, &server)?;
+    watch_and_reinstall(selected, install_dir, pm, deep, &reverse_deps, &server)?;
 
     // Cleanup on normal exit
     restore_npmrc(&npmrc_path, original_npmrc.as_deref());
-    eprintln!("\n{} Cleaned up .npmrc", style("*").dim());
+    let _ = cliclack::outro("Cleaned up .npmrc");
 
     Ok(())
 }
@@ -768,10 +661,7 @@ fn watch_and_reinstall(
         watcher
             .watch(&entry.source_dir, RecursiveMode::Recursive)
             .map_err(|e| format!("failed to watch {}: {e}", entry.source_dir.display()))?;
-        eprintln!("  {} {}",
-            style("|").dim(),
-            style(entry.source_dir.display()).dim(),
-        );
+        let _ = cliclack::log::remark(format!("watching {}", style(entry.source_dir.display()).dim()));
     }
 
     let batch_window = Duration::from_secs(5);
@@ -820,37 +710,25 @@ fn watch_and_reinstall(
 
         let pkg_list = changed_packages
             .iter()
-            .map(|p| style(p).cyan().bold().to_string())
+            .map(|p| style(p).cyan().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        eprintln!("\n{} Change detected in: {}", style("*").yellow().bold(), pkg_list);
+        let _ = cliclack::log::warning(format!("Change detected in: {pkg_list}"));
 
-        let spinner = indicatif::ProgressBar::new_spinner();
-        spinner.set_style(
-            indicatif::ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
-        );
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        let spinner = cliclack::spinner();
 
         // Re-pack changed packages
         for pkg_name in &changed_packages {
             let entry = selected.iter().find(|e| &e.name == pkg_name).unwrap();
-            spinner.set_message(format!("Re-packing {}...", style(&entry.name).cyan()));
+            spinner.start(format!("Re-packing {}...", style(&entry.name).cyan()));
 
             let pkg_json_path = entry.source_dir.join("package.json");
             let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
-                eprintln!("  {} could not read {}",
-                    style("warn:").yellow(),
-                    pkg_json_path.display(),
-                );
+                let _ = cliclack::log::warning(format!("Could not read {}", pkg_json_path.display()));
                 continue;
             };
             let Ok(pkg_json) = serde_json::from_str::<pack::PublishPackageJson>(&raw) else {
-                eprintln!("  {} could not parse {}",
-                    style("warn:").yellow(),
-                    pkg_json_path.display(),
-                );
+                let _ = cliclack::log::warning(format!("Could not parse {}", pkg_json_path.display()));
                 continue;
             };
 
@@ -862,10 +740,7 @@ fn watch_and_reinstall(
                     server.update_tarball(&entry.name, tarball);
                 }
                 Err(e) => {
-                    eprintln!("  {} failed to pack {}: {e}",
-                        style("warn:").yellow(),
-                        style(&entry.name).cyan(),
-                    );
+                    let _ = cliclack::log::warning(format!("Failed to pack {}: {e}", entry.name));
                 }
             }
         }
@@ -884,13 +759,13 @@ fn watch_and_reinstall(
             }
         }
 
-        spinner.set_message(format!("Clearing cache for {} package(s)...", style(to_clear.len()).bold()));
+        spinner.start(format!("Clearing cache for {} package(s)...", to_clear.len()));
         pm::clear_cache(pm, &to_clear, consumer_dir);
 
-        spinner.set_message(format!("Running {} update...", style(pm.name()).green()));
+        spinner.start(format!("Running {} update...", style(pm.name()).green()));
         match pm::run_update(pm, &to_clear, consumer_dir) {
-            Ok(()) => spinner.finish_with_message(format!("{} Updated successfully", style("*").green().bold())),
-            Err(e) => spinner.finish_with_message(format!("{} Update failed: {e}", style("error:").red().bold())),
+            Ok(()) => spinner.stop("Updated successfully"),
+            Err(e) => spinner.stop(format!("{}", style(format!("Update failed: {e}")).red())),
         }
     }
 

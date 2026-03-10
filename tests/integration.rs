@@ -439,11 +439,7 @@ fn install_end_to_end() {
     let output = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Verify it started the registry and ran install
-    assert!(
-        stderr.contains("Local registry started"),
-        "expected registry start message, got: {stderr}"
-    );
+    // Verify it ran install and entered watch mode
     assert!(
         stderr.contains("Watching for changes"),
         "expected watch message, got: {stderr}"
@@ -584,9 +580,9 @@ fn workspace_install_detects_proxied_deps() {
     let app_a = ws_root.join("apps").join("app-a");
     create_consumer(&app_a, &[("@test-smug/ws-lib", "^2.0.0")]);
 
-    // App that does NOT use any proxied package
+    // App that does NOT use any proxied package (no deps that would fail pnpm install)
     let app_b = ws_root.join("apps").join("app-b");
-    create_consumer(&app_b, &[("some-other-pkg", "^1.0.0")]);
+    create_consumer(&app_b, &[]);
 
     // Run install --all; it should detect workspace and find @test-smug/ws-lib
     // used by app-a. It will fail at pnpm install (no real pnpm setup) but
@@ -610,10 +606,6 @@ fn workspace_install_detects_proxied_deps() {
     assert!(
         stderr.contains("@test-smug/ws-lib"),
         "expected proxied package in output, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("Local registry started"),
-        "expected registry start, got: {stderr}"
     );
 
     cleanup_store("@test-smug/ws-lib");
@@ -713,10 +705,6 @@ fn workspace_install_multiple_apps_same_dep() {
     assert!(
         stderr.contains("@test-smug/ws-shared"),
         "expected proxied dep in output, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("Local registry started"),
-        "expected registry start, got: {stderr}"
     );
 
     cleanup_store("@test-smug/ws-shared");

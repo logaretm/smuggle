@@ -108,7 +108,9 @@ fn collect_files(pkg_dir: &Path, pkg_json: &PublishPackageJson) -> Result<Vec<Pa
 
     if let Some(file_patterns) = &pkg_json.files {
         // files field: whitelist mode
-        for pattern in file_patterns {
+        for raw_pattern in file_patterns {
+            // Patterns are always relative to package root — strip leading slashes
+            let pattern = raw_pattern.trim_start_matches('/');
             let full_pattern = pkg_dir.join(pattern);
             let pattern_str = full_pattern.to_string_lossy();
 
@@ -128,7 +130,7 @@ fn collect_files(pkg_dir: &Path, pkg_json: &PublishPackageJson) -> Result<Vec<Pa
                         }
                     } else {
                         eprintln!(
-                            "  warning: files pattern '{}' matched nothing ({})",
+                            "  warn: files pattern '{}' matched nothing ({})",
                             pattern, pattern_str
                         );
                     }

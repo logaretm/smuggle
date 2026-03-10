@@ -952,6 +952,7 @@ dependencies = [
  "assert_cmd",
  "base64",
  "clap",
+ "console",
  "ctrlc",
  "dialoguer",
  "flate2",

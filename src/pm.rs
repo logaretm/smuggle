@@ -1,3 +1,4 @@
+use console::style;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -56,7 +57,11 @@ pub fn clear_cache(pm: PackageManager, packages: &[String], cwd: &Path) {
 
     for pkg in packages {
         let args = pm.cache_delete_args(pkg);
-        eprintln!("  {} {}", pm.name(), args.join(" "));
+        eprintln!("  {} {} {}",
+            style("|").dim(),
+            style(pm.name()).dim(),
+            style(args.join(" ")).dim(),
+        );
 
         match Command::new(pm.name())
             .args(&args)
@@ -66,15 +71,25 @@ pub fn clear_cache(pm: PackageManager, packages: &[String], cwd: &Path) {
             .spawn()
         {
             Ok(child) => children.push((pkg.clone(), child)),
-            Err(e) => eprintln!("  error spawning {}: {e}", pm.name()),
+            Err(e) => eprintln!("  {} spawning {}: {e}",
+                style("error:").red().bold(),
+                pm.name(),
+            ),
         }
 
         if children.len() >= MAX_CONCURRENT {
             for (name, mut child) in children.drain(..) {
                 match child.wait() {
                     Ok(s) if s.success() => {}
-                    Ok(s) => eprintln!("  warning: cache clear failed for {}: {}", name, s),
-                    Err(e) => eprintln!("  error waiting for {}: {e}", name),
+                    Ok(s) => eprintln!("  {} cache clear failed for {}: {}",
+                        style("warn:").yellow(),
+                        style(&name).cyan(),
+                        s,
+                    ),
+                    Err(e) => eprintln!("  {} waiting for {}: {e}",
+                        style("error:").red().bold(),
+                        name,
+                    ),
                 }
             }
         }
@@ -83,8 +98,15 @@ pub fn clear_cache(pm: PackageManager, packages: &[String], cwd: &Path) {
     for (name, mut child) in children {
         match child.wait() {
             Ok(s) if s.success() => {}
-            Ok(s) => eprintln!("  warning: cache clear failed for {}: {}", name, s),
-            Err(e) => eprintln!("  error waiting for {}: {e}", name),
+            Ok(s) => eprintln!("  {} cache clear failed for {}: {}",
+                style("warn:").yellow(),
+                style(&name).cyan(),
+                s,
+            ),
+            Err(e) => eprintln!("  {} waiting for {}: {e}",
+                style("error:").red().bold(),
+                name,
+            ),
         }
     }
 }

@@ -4,6 +4,7 @@ mod registry;
 mod store;
 
 use clap::{Parser, Subcommand};
+use console::style;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -13,7 +14,19 @@ use std::path::PathBuf;
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+
+    /// Path to the consumer project (defaults to current directory)
+    #[arg(short, long, global = true)]
+    path: Option<PathBuf>,
+
+    /// Also clear cache for proxied packages that depend on other proxied packages
+    #[arg(long, global = true)]
+    deep: bool,
+
+    /// Select all matching packages without prompting
+    #[arg(long, global = true)]
+    all: bool,
 }
 
 #[derive(Subcommand)]
@@ -54,26 +67,38 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Publish { path } => {
+        Some(Commands::Publish { path }) => {
             let pkg_dir = path.unwrap_or_else(|| std::env::current_dir().unwrap());
             if let Err(e) = cmd_publish(&pkg_dir) {
-                eprintln!("error: {e}");
+                eprintln!("{} {e}", style("error:").red().bold());
                 std::process::exit(1);
             }
         }
-        Commands::List => {
+        Some(Commands::List) => {
             cmd_list();
         }
-        Commands::Unpublish { name } => {
+        Some(Commands::Unpublish { name }) => {
             if let Err(e) = cmd_unpublish(&name) {
-                eprintln!("error: {e}");
+                eprintln!("{} {e}", style("error:").red().bold());
                 std::process::exit(1);
             }
         }
-        Commands::Install { path, deep, all } => {
-            let consumer_dir = path.unwrap_or_else(|| std::env::current_dir().unwrap());
+        Some(Commands::Install { path, deep, all }) => {
+            let consumer_dir = path.or(cli.path)
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            let deep = deep || cli.deep;
+            let all = all || cli.all;
             if let Err(e) = cmd_install(&consumer_dir, deep, all) {
-                eprintln!("error: {e}");
+                eprintln!("{} {e}", style("error:").red().bold());
+                std::process::exit(1);
+            }
+        }
+        None => {
+            // bare `smuggle` = `smuggle install`
+            let consumer_dir = cli.path
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            if let Err(e) = cmd_install(&consumer_dir, cli.deep, cli.all) {
+                eprintln!("{} {e}", style("error:").red().bold());
                 std::process::exit(1);
             }
         }
@@ -110,14 +135,19 @@ fn cmd_publish(pkg_dir: &PathBuf) -> Result<(), String> {
             .template("{spinner:.cyan} {msg}")
             .unwrap(),
     );
-    spinner.set_message(format!("packing {name}@{version}..."));
+    spinner.set_message(format!("Packing {}...", style(format!("{name}@{version}")).cyan()));
     spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
     let tarball = pack::pack(&pkg_dir, &pkg_json)?;
 
     store::save(name, version, &pkg_dir, &tarball, &pkg_json.dependencies())?;
 
-    spinner.finish_with_message(format!("published {name}@{version} → ~/.smuggle/packages/{name}/"));
+    spinner.finish_with_message(format!(
+        "{} Published {} -> {}",
+        style("*").green().bold(),
+        style(format!("{name}@{version}")).cyan().bold(),
+        style(format!("~/.smuggle/packages/{name}/")).dim(),
+    ));
 
     Ok(())
 }
@@ -125,24 +155,31 @@ fn cmd_publish(pkg_dir: &PathBuf) -> Result<(), String> {
 fn cmd_list() {
     let packages = store::list();
     if packages.is_empty() {
-        eprintln!("no packages registered. run `smuggle publish` in a package directory first.");
+        eprintln!("{} No packages registered. Run {} in a package directory first.",
+            style("*").dim(),
+            style("smuggle publish").cyan(),
+        );
         return;
     }
 
-    eprintln!("registered packages:\n");
+    eprintln!("{}\n", style("Registered packages:").bold());
     for entry in packages {
         eprintln!(
-            "  {} @ {} ({})",
-            entry.name,
-            entry.version,
-            entry.source_dir.display()
+            "  {} {} {} {}",
+            style("*").green(),
+            style(&entry.name).cyan().bold(),
+            style(format!("@ {}", entry.version)).dim(),
+            style(format!("({})", entry.source_dir.display())).dim(),
         );
     }
 }
 
 fn cmd_unpublish(name: &str) -> Result<(), String> {
     store::remove(name)?;
-    eprintln!("removed {name} from local store");
+    eprintln!("{} Removed {} from local store",
+        style("*").green().bold(),
+        style(name).cyan().bold(),
+    );
     Ok(())
 }
 
@@ -179,9 +216,16 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
     matches.sort_by(|a, b| a.name.cmp(&b.name));
 
     let selected: Vec<&store::StoreEntry> = if select_all {
-        eprintln!("selecting all {} matching package(s)", matches.len());
+        eprintln!("{} Selecting all {} matching package(s)",
+            style("*").cyan().bold(),
+            style(matches.len()).bold(),
+        );
         for e in &matches {
-            eprintln!("  {} @ {} ({})", e.name, e.version, e.source_dir.display());
+            eprintln!("  {} {} {}",
+                style("|").dim(),
+                style(&e.name).cyan().bold(),
+                style(format!("@ {} ({})", e.version, e.source_dir.display())).dim(),
+            );
         }
         matches.clone()
     } else {
@@ -200,7 +244,7 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
             .map_err(|e| format!("selection cancelled: {e}"))?;
 
         if selections.is_empty() {
-            eprintln!("no packages selected, nothing to do.");
+            eprintln!("{} No packages selected, nothing to do.", style("*").dim());
             return Ok(());
         }
 
@@ -208,7 +252,10 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
     };
 
     let pm = pm::detect_package_manager(&consumer_dir);
-    eprintln!("\ndetected package manager: {}", pm.name());
+    eprintln!("\n{} Detected package manager: {}",
+        style("*").cyan().bold(),
+        style(pm.name()).green().bold(),
+    );
 
     let reverse_deps = if deep {
         build_reverse_dep_map(&selected)
@@ -233,7 +280,10 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
 
     let server = registry::start(registry_packages)?;
     let port = server.port;
-    eprintln!("local registry started on port {port}");
+    eprintln!("{} Local registry started on port {}",
+        style("*").green().bold(),
+        style(port).cyan(),
+    );
 
     // Backup and write .npmrc
     let npmrc_path = consumer_dir.join(".npmrc");
@@ -269,21 +319,30 @@ fn cmd_install(consumer_dir: &PathBuf, deep: bool, select_all: bool) -> Result<(
         }
     }
 
-    eprintln!("\nclearing cache for {} package(s)...", to_clear.len());
+    eprintln!("\n{} Clearing cache for {} package(s)...",
+        style("*").cyan().bold(),
+        style(to_clear.len()).bold(),
+    );
     pm::clear_cache(pm, &to_clear, &consumer_dir);
 
     // Run install
-    eprintln!("\nrunning {} install...", pm.name());
+    eprintln!("\n{} Running {} install...",
+        style("*").cyan().bold(),
+        style(pm.name()).green().bold(),
+    );
     pm::run_install(pm, &consumer_dir)?;
 
-    eprintln!("\nwatching for changes... (ctrl-c to stop)\n");
+    eprintln!("\n{} Watching for changes... {}\n",
+        style("*").green().bold(),
+        style("(ctrl-c to stop)").dim(),
+    );
 
     // Watch for changes
     watch_and_reinstall(&selected, &consumer_dir, pm, deep, &reverse_deps, &server)?;
 
     // Cleanup on normal exit
     restore_npmrc(&npmrc_path, original_npmrc.as_deref());
-    eprintln!("\ncleaned up .npmrc");
+    eprintln!("\n{} Cleaned up .npmrc", style("*").dim());
 
     Ok(())
 }
@@ -333,7 +392,7 @@ fn write_npmrc(
         content.push_str(&format!("registry=http://localhost:{port}\n"));
     }
 
-    // Preserve non-lpm lines from existing .npmrc
+    // Preserve non-smuggle lines from existing .npmrc
     if path.exists() {
         let existing = std::fs::read_to_string(path).unwrap_or_default();
         for line in existing.lines() {
@@ -391,7 +450,10 @@ fn watch_and_reinstall(
         watcher
             .watch(&entry.source_dir, RecursiveMode::Recursive)
             .map_err(|e| format!("failed to watch {}: {e}", entry.source_dir.display()))?;
-        eprintln!("  watching {}", entry.source_dir.display());
+        eprintln!("  {} {}",
+            style("|").dim(),
+            style(entry.source_dir.display()).dim(),
+        );
     }
 
     let batch_window = Duration::from_secs(5);
@@ -438,7 +500,12 @@ fn watch_and_reinstall(
             continue;
         }
 
-        eprintln!("\nchange detected in: {}", changed_packages.join(", "));
+        let pkg_list = changed_packages
+            .iter()
+            .map(|p| style(p).cyan().bold().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("\n{} Change detected in: {}", style("*").yellow().bold(), pkg_list);
 
         let spinner = indicatif::ProgressBar::new_spinner();
         spinner.set_style(
@@ -451,15 +518,21 @@ fn watch_and_reinstall(
         // Re-pack changed packages
         for pkg_name in &changed_packages {
             let entry = selected.iter().find(|e| &e.name == pkg_name).unwrap();
-            spinner.set_message(format!("re-packing {}...", entry.name));
+            spinner.set_message(format!("Re-packing {}...", style(&entry.name).cyan()));
 
             let pkg_json_path = entry.source_dir.join("package.json");
             let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
-                eprintln!("  warning: could not read {}", pkg_json_path.display());
+                eprintln!("  {} could not read {}",
+                    style("warn:").yellow(),
+                    pkg_json_path.display(),
+                );
                 continue;
             };
             let Ok(pkg_json) = serde_json::from_str::<pack::PublishPackageJson>(&raw) else {
-                eprintln!("  warning: could not parse {}", pkg_json_path.display());
+                eprintln!("  {} could not parse {}",
+                    style("warn:").yellow(),
+                    pkg_json_path.display(),
+                );
                 continue;
             };
 
@@ -471,7 +544,10 @@ fn watch_and_reinstall(
                     server.update_tarball(&entry.name, tarball);
                 }
                 Err(e) => {
-                    eprintln!("  warning: failed to pack {}: {e}", entry.name);
+                    eprintln!("  {} failed to pack {}: {e}",
+                        style("warn:").yellow(),
+                        style(&entry.name).cyan(),
+                    );
                 }
             }
         }
@@ -490,13 +566,13 @@ fn watch_and_reinstall(
             }
         }
 
-        spinner.set_message(format!("clearing cache for {} package(s)...", to_clear.len()));
+        spinner.set_message(format!("Clearing cache for {} package(s)...", style(to_clear.len()).bold()));
         pm::clear_cache(pm, &to_clear, consumer_dir);
 
-        spinner.set_message(format!("running {} update...", pm.name()));
+        spinner.set_message(format!("Running {} update...", style(pm.name()).green()));
         match pm::run_update(pm, &to_clear, consumer_dir) {
-            Ok(()) => spinner.finish_with_message("updated successfully"),
-            Err(e) => spinner.finish_with_message(format!("update failed: {e}")),
+            Ok(()) => spinner.finish_with_message(format!("{} Updated successfully", style("*").green().bold())),
+            Err(e) => spinner.finish_with_message(format!("{} Update failed: {e}", style("error:").red().bold())),
         }
     }
 

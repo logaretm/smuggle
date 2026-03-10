@@ -345,7 +345,7 @@ fn unpublish_removes_package() {
         .args(["unpublish", "@test-smug/unpublish-test"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("removed"));
+        .stderr(predicate::str::contains("Removed"));
 
     assert!(!store_dir().join("@test-smug/unpublish-test").exists());
 }
@@ -441,11 +441,11 @@ fn install_end_to_end() {
 
     // Verify it started the registry and ran install
     assert!(
-        stderr.contains("local registry started"),
+        stderr.contains("Local registry started"),
         "expected registry start message, got: {stderr}"
     );
     assert!(
-        stderr.contains("watching for changes"),
+        stderr.contains("Watching for changes"),
         "expected watch message, got: {stderr}"
     );
 

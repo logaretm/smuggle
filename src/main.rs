@@ -573,9 +573,10 @@ fn run_install_flow(
 
     extract_spinner.stop(format!("Smuggled {} package(s) into node_modules", style(targets.len()).green()));
 
-    // Clear bundler caches so they pick up new files
+    // Clear bundler caches and trigger vite restart
     let extra: Vec<&std::path::Path> = workspace_pkg_dirs.iter().map(|p| p.as_path()).collect();
     pm::clear_bundler_caches(install_dir, &extra);
+    touch_vite_configs(install_dir, workspace_pkg_dirs);
 
     cliclack::log::success(format!("Watching for changes... {}", style("(ctrl-c to stop)").dim()))
         .map_err(|e| e.to_string())?;
@@ -700,6 +701,7 @@ fn watch_and_reinstall(
     workspace_pkg_dirs: &[PathBuf],
 ) -> Result<(), String> {
     use notify::{RecursiveMode, Watcher};
+    use std::collections::HashMap;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -741,6 +743,14 @@ fn watch_and_reinstall(
             style(&entry.name).dim(),
             style(display_dirs.join(", ")).dim(),
         ));
+    }
+
+    // Track tarball hashes to avoid unnecessary restarts
+    let mut last_hashes: HashMap<String, u64> = HashMap::new();
+    for entry in selected {
+        if let Ok(tarball) = store::load_tarball(&entry.name) {
+            last_hashes.insert(entry.name.clone(), hash_bytes(&tarball));
+        }
     }
 
     let batch_window = Duration::from_secs(5);
@@ -796,14 +806,15 @@ fn watch_and_reinstall(
 
         let spinner = cliclack::spinner();
 
-        // Re-pack and extract directly into node_modules
+        // Re-pack and check if content actually changed
+        let mut actually_changed: Vec<String> = Vec::new();
         for pkg_name in &changed_packages {
             let entry = selected.iter().find(|e| &e.name == pkg_name).unwrap();
             let Some(target) = targets.iter().find(|t| t.name == *pkg_name) else {
                 continue;
             };
 
-            spinner.start(format!("Smuggling {}...", style(&entry.name).cyan()));
+            spinner.start(format!("Packing {}...", style(&entry.name).cyan()));
 
             let pkg_json_path = entry.source_dir.join("package.json");
             let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
@@ -817,10 +828,22 @@ fn watch_and_reinstall(
 
             match pack::pack(&entry.source_dir, &pkg_json) {
                 Ok(tarball) => {
+                    let new_hash = hash_bytes(&tarball);
+                    let old_hash = last_hashes.get(pkg_name).copied();
+
+                    if old_hash == Some(new_hash) {
+                        continue;
+                    }
+
+                    last_hashes.insert(pkg_name.clone(), new_hash);
                     let version = pkg_json.version.as_deref().unwrap_or("0.0.0");
                     let _ = store::save(&entry.name, version, &entry.source_dir, &tarball, &pkg_json.dependencies());
+
+                    spinner.start(format!("Smuggling {}...", style(&entry.name).cyan()));
                     if let Err(e) = pack::extract_tarball_to(&tarball, &target.target_dir) {
                         let _ = cliclack::log::warning(format!("Failed to extract {}: {e}", entry.name));
+                    } else {
+                        actually_changed.push(pkg_name.clone());
                     }
                 }
                 Err(e) => {
@@ -829,11 +852,17 @@ fn watch_and_reinstall(
             }
         }
 
-        // Clear bundler caches
+        if actually_changed.is_empty() {
+            spinner.stop(format!("{}", style("No content changes").dim()));
+            continue;
+        }
+
+        // Clear bundler caches and trigger vite restart
         let extra: Vec<&std::path::Path> = workspace_pkg_dirs.iter().map(|p| p.as_path()).collect();
         pm::clear_bundler_caches(consumer_dir, &extra);
+        touch_vite_configs(consumer_dir, workspace_pkg_dirs);
 
-        spinner.stop(format!("Smuggled {}", style(changed_packages.join(", ")).cyan()));
+        spinner.stop(format!("Smuggled {}", style(actually_changed.join(", ")).cyan()));
     }
 
     Ok(())
@@ -911,6 +940,38 @@ fn resolve_watch_dirs(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
     }
 
     filtered
+}
+
+/// Touch vite config files to trigger a dev server restart.
+/// Checks root and all workspace member directories.
+fn touch_vite_configs(root: &std::path::Path, workspace_pkg_dirs: &[PathBuf]) {
+    let config_names = ["vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"];
+
+    let mut dirs = vec![root.to_path_buf()];
+    dirs.extend_from_slice(workspace_pkg_dirs);
+
+    for dir in &dirs {
+        for name in &config_names {
+            let path = dir.join(name);
+            if path.exists() {
+                let now = filetime::FileTime::now();
+                let _ = filetime::set_file_mtime(&path, now);
+                let display = path.strip_prefix(root).unwrap_or(&path);
+                let _ = cliclack::log::remark(format!(
+                    "touched {} to trigger reload",
+                    style(display.display()).dim(),
+                ));
+                break;
+            }
+        }
+    }
+}
+
+fn hash_bytes(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn is_ignored_path(path: &std::path::Path, source_root: &std::path::Path) -> bool {

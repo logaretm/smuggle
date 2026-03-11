@@ -15,6 +15,7 @@ console = "0.15"
 cliclack = "0.4"
 ignore = "0.4"
 notify = { version = "8", features = ["macos_fsevent"] }
+filetime = "0.2"
 flate2 = "1"
 tar = "0.4"
 ctrlc = "3"

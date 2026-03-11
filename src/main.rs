@@ -1,6 +1,5 @@
 mod pack;
 mod pm;
-mod registry;
 mod store;
 mod workspace;
 
@@ -351,7 +350,7 @@ fn cmd_install(consumer_dir: &PathBuf, select_all: bool) -> Result<(), String> {
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(&consumer_dir, &selected)
+    run_install_flow(&consumer_dir, &selected, &[])
 }
 
 fn cmd_install_workspace(
@@ -449,18 +448,17 @@ fn cmd_install_workspace(
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(root, &selected)
+    let ws_dirs: Vec<PathBuf> = workspace_packages.iter().map(|wp| wp.path.clone()).collect();
+    run_install_flow(root, &selected, &ws_dirs)
 }
 
-/// Shared install flow: expand deps, start registry, write .npmrc, clear cache, install, watch.
+/// Shared install flow: expand deps, overwrite in node_modules, watch for changes.
+/// No registry, no .npmrc, no lockfile changes — just direct file replacement.
 fn run_install_flow(
     install_dir: &std::path::Path,
     selected: &[&store::StoreEntry],
+    workspace_pkg_dirs: &[PathBuf],
 ) -> Result<(), String> {
-    let pm = pm::detect_package_manager(install_dir);
-    cliclack::log::info(format!("Detected package manager: {}", style(pm.name()).green().bold()))
-        .map_err(|e| e.to_string())?;
-
     // Expand: include registered transitive dependencies
     let registered = store::list();
     let all_entries = expand_with_registered_deps(selected, &registered);
@@ -473,79 +471,188 @@ fn run_install_flow(
             .map(|e| e.name.as_str())
             .collect();
         cliclack::log::info(format!(
-            "Also watching {} transitive dep(s): {}",
+            "Also proxying {} transitive dep(s): {}",
             extra.len(),
             extra.iter().map(|n| style(n).cyan().to_string()).collect::<Vec<_>>().join(", "),
         )).map_err(|e| e.to_string())?;
     }
 
-    // Build reverse dep map (always — so dependents get cache-cleared on change)
-    let reverse_deps = build_reverse_dep_map(&all_refs);
+    // Resolve each package's location in node_modules.
+    // In workspaces, packages may be in member node_modules, not the root.
+    let mut nm_dirs: Vec<PathBuf> = vec![install_dir.join("node_modules")];
+    for ws_dir in workspace_pkg_dirs {
+        let nm = ws_dir.join("node_modules");
+        if nm.exists() {
+            nm_dirs.push(nm);
+        }
+    }
 
-    // Start registry server
-    let registry_packages: Vec<registry::RegistryPackage> = all_refs
-        .iter()
-        .map(|entry| {
-            let tarball = store::load_tarball(&entry.name)
-                .unwrap_or_else(|e| panic!("failed to load tarball for {}: {e}", entry.name));
-            registry::RegistryPackage {
-                name: entry.name.clone(),
-                version: entry.version.clone(),
-                tarball,
-                dependencies: entry.dependencies.clone(),
+    if !nm_dirs.iter().any(|d| d.exists()) {
+        return Err("node_modules not found — run your package manager's install first".into());
+    }
+
+    let mut targets: Vec<OverrideTarget> = Vec::new();
+    for entry in &all_refs {
+        // Find the package in any node_modules directory
+        let mut found = false;
+        for nm_dir in &nm_dirs {
+            let pkg_path = nm_dir.join(&entry.name);
+            if !pkg_path.exists() {
+                continue;
             }
-        })
-        .collect();
+            // Resolve symlinks (pnpm uses symlinks to .pnpm virtual store)
+            let real_path = pkg_path.canonicalize()
+                .map_err(|e| format!("failed to resolve {}: {e}", pkg_path.display()))?;
 
-    let server = registry::start(registry_packages)?;
-    let port = server.port;
+            // Avoid duplicates (pnpm workspace members may resolve to the same .pnpm path)
+            if !targets.iter().any(|t| t.target_dir == real_path) {
+                targets.push(OverrideTarget {
+                    name: entry.name.clone(),
+                    target_dir: real_path,
+                });
+            }
+            found = true;
+        }
+        if !found {
+            let _ = cliclack::log::warning(format!(
+                "{} not found in node_modules — skipping",
+                style(&entry.name).cyan(),
+            ));
+        }
+    }
+
+    if targets.is_empty() {
+        return Err("none of the selected packages are installed in node_modules".into());
+    }
+
+    // Backup original directories
+    let backup_base = std::env::temp_dir()
+        .join("smuggle-backup")
+        .join(std::process::id().to_string());
+    std::fs::create_dir_all(&backup_base)
+        .map_err(|e| format!("failed to create backup dir: {e}"))?;
 
     let spinner = cliclack::spinner();
-    spinner.start("Starting local registry...");
-    spinner.stop(format!("Local registry started on port {}", style(port).cyan()));
+    spinner.start("Backing up originals...");
 
-    // Backup and write .npmrc
-    let npmrc_path = install_dir.join(".npmrc");
-    let original_npmrc = if npmrc_path.exists() {
-        Some(std::fs::read_to_string(&npmrc_path).unwrap_or_default())
-    } else {
-        None
-    };
+    for target in &targets {
+        let backup_name = target.name.replace('/', "__");
+        let backup_path = backup_base.join(&backup_name);
+        copy_dir(&target.target_dir, &backup_path)
+            .map_err(|e| format!("failed to backup {}: {e}", target.name))?;
+    }
 
-    write_npmrc(&npmrc_path, port, &all_refs)?;
+    spinner.stop("Originals backed up");
 
-    // Cleanup on ctrl-c
-    let cleanup_npmrc = npmrc_path.clone();
-    let cleanup_original = original_npmrc.clone();
+    // Set up cleanup on ctrl-c
+    let cleanup_targets: Vec<(PathBuf, PathBuf)> = targets
+        .iter()
+        .map(|t| {
+            let backup_name = t.name.replace('/', "__");
+            (backup_base.join(&backup_name), t.target_dir.clone())
+        })
+        .collect();
+    let cleanup_backup_base = backup_base.clone();
     let _ = ctrlc::set_handler(move || {
-        restore_npmrc(&cleanup_npmrc, cleanup_original.as_deref());
+        for (backup, target) in &cleanup_targets {
+            let _ = restore_dir(backup, target);
+        }
+        let _ = std::fs::remove_dir_all(&cleanup_backup_base);
+        eprintln!("\n  Restored originals");
         std::process::exit(0);
     });
 
-    // Clear cache for all proxied packages
-    let all_names: Vec<String> = all_refs.iter().map(|e| e.name.clone()).collect();
+    // Extract tarballs into node_modules
+    let extract_spinner = cliclack::spinner();
+    extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
 
-    let cache_spinner = cliclack::spinner();
-    cache_spinner.start(format!("Clearing cache for {} package(s)...", all_names.len()));
-    pm::clear_cache(pm, &all_names, install_dir);
-    pm::clear_bundler_caches(install_dir);
-    cache_spinner.stop("Cache cleared");
+    for target in &targets {
+        let tarball = store::load_tarball(&target.name)?;
+        pack::extract_tarball_to(&tarball, &target.target_dir)?;
+    }
 
-    // Run install
-    cliclack::log::step(format!("Running {} install...", style(pm.name()).green()))
-        .map_err(|e| e.to_string())?;
-    pm::run_install(pm, install_dir)?;
+    extract_spinner.stop(format!("Smuggled {} package(s) into node_modules", style(targets.len()).green()));
+
+    // Clear bundler caches so they pick up new files
+    let extra: Vec<&std::path::Path> = workspace_pkg_dirs.iter().map(|p| p.as_path()).collect();
+    pm::clear_bundler_caches(install_dir, &extra);
 
     cliclack::log::success(format!("Watching for changes... {}", style("(ctrl-c to stop)").dim()))
         .map_err(|e| e.to_string())?;
 
     // Watch for changes
-    watch_and_reinstall(&all_refs, install_dir, pm, &reverse_deps, &server)?;
+    watch_and_reinstall(&all_refs, &targets, install_dir, workspace_pkg_dirs)?;
 
-    // Cleanup on normal exit
-    restore_npmrc(&npmrc_path, original_npmrc.as_deref());
-    let _ = cliclack::outro("Cleaned up .npmrc");
+    // Cleanup on normal exit — restore originals
+    let restore_spinner = cliclack::spinner();
+    restore_spinner.start("Restoring originals...");
+    for target in &targets {
+        let backup_name = target.name.replace('/', "__");
+        let backup_path = backup_base.join(&backup_name);
+        let _ = restore_dir(&backup_path, &target.target_dir);
+    }
+    let _ = std::fs::remove_dir_all(&backup_base);
+    restore_spinner.stop("Restored originals");
 
+    let _ = cliclack::outro("Done");
+
+    Ok(())
+}
+
+struct OverrideTarget {
+    name: String,
+    target_dir: PathBuf,
+}
+
+/// Copy a directory tree, preserving structure.
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("read {}: {e}", src.display()))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            // Skip nested node_modules (pnpm dep symlinks)
+            if entry.file_name() == "node_modules" {
+                continue;
+            }
+            copy_dir(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("copy {}: {e}", src_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Restore a directory from backup, replacing current contents.
+fn restore_dir(backup: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    // Remove current files (but not node_modules subdirs managed by the package manager)
+    if let Ok(entries) = std::fs::read_dir(target) {
+        for entry in entries.flatten() {
+            if entry.file_name() == "node_modules" {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    // Copy backup files back
+    if let Ok(entries) = std::fs::read_dir(backup) {
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let dst = target.join(entry.file_name());
+            if src.is_dir() {
+                copy_dir(&src, &dst)?;
+            } else {
+                std::fs::copy(&src, &dst).map_err(|e| format!("restore {}: {e}", dst.display()))?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -585,82 +692,12 @@ fn expand_with_registered_deps(
     result
 }
 
-fn build_reverse_dep_map(
-    selected: &[&store::StoreEntry],
-) -> std::collections::HashMap<String, Vec<String>> {
-    let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    let selected_names: std::collections::HashSet<String> =
-        selected.iter().map(|e| e.name.clone()).collect();
-
-    for entry in selected {
-        for dep_name in entry.dependencies.keys() {
-            if selected_names.contains(dep_name) {
-                map.entry(dep_name.clone())
-                    .or_default()
-                    .push(entry.name.clone());
-            }
-        }
-    }
-
-    map
-}
-
-fn write_npmrc(
-    path: &std::path::Path,
-    port: u16,
-    selected: &[&store::StoreEntry],
-) -> Result<(), String> {
-    let mut content = String::from("# managed by smuggle — do not edit\n");
-
-    let scopes: std::collections::HashSet<&str> = selected
-        .iter()
-        .filter_map(|e| {
-            if e.name.starts_with('@') {
-                e.name.split('/').next()
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if scopes.len() == 1 && selected.iter().all(|e| e.name.starts_with('@')) {
-        let scope = scopes.into_iter().next().unwrap();
-        content.push_str(&format!("{scope}:registry=http://localhost:{port}\n"));
-    } else {
-        content.push_str(&format!("registry=http://localhost:{port}\n"));
-    }
-
-    // Preserve non-smuggle lines from existing .npmrc
-    if path.exists() {
-        let existing = std::fs::read_to_string(path).unwrap_or_default();
-        for line in existing.lines() {
-            if !line.contains("managed by smuggle") && !line.contains(&format!("localhost:{port}")) {
-                content.push_str(line);
-                content.push('\n');
-            }
-        }
-    }
-
-    std::fs::write(path, content).map_err(|e| format!("failed to write .npmrc: {e}"))
-}
-
-fn restore_npmrc(path: &std::path::Path, original: Option<&str>) {
-    match original {
-        Some(content) => {
-            let _ = std::fs::write(path, content);
-        }
-        None => {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
 
 fn watch_and_reinstall(
     selected: &[&store::StoreEntry],
+    targets: &[OverrideTarget],
     consumer_dir: &std::path::Path,
-    pm: pm::PackageManager,
-    reverse_deps: &std::collections::HashMap<String, Vec<String>>,
-    server: &registry::Server,
+    workspace_pkg_dirs: &[PathBuf],
 ) -> Result<(), String> {
     use notify::{RecursiveMode, Watcher};
     use std::sync::mpsc;
@@ -759,10 +796,14 @@ fn watch_and_reinstall(
 
         let spinner = cliclack::spinner();
 
-        // Re-pack changed packages
+        // Re-pack and extract directly into node_modules
         for pkg_name in &changed_packages {
             let entry = selected.iter().find(|e| &e.name == pkg_name).unwrap();
-            spinner.start(format!("Re-packing {}...", style(&entry.name).cyan()));
+            let Some(target) = targets.iter().find(|t| t.name == *pkg_name) else {
+                continue;
+            };
+
+            spinner.start(format!("Smuggling {}...", style(&entry.name).cyan()));
 
             let pkg_json_path = entry.source_dir.join("package.json");
             let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
@@ -777,9 +818,10 @@ fn watch_and_reinstall(
             match pack::pack(&entry.source_dir, &pkg_json) {
                 Ok(tarball) => {
                     let version = pkg_json.version.as_deref().unwrap_or("0.0.0");
-                    let _ =
-                        store::save(&entry.name, version, &entry.source_dir, &tarball, &pkg_json.dependencies());
-                    server.update_tarball(&entry.name, tarball);
+                    let _ = store::save(&entry.name, version, &entry.source_dir, &tarball, &pkg_json.dependencies());
+                    if let Err(e) = pack::extract_tarball_to(&tarball, &target.target_dir) {
+                        let _ = cliclack::log::warning(format!("Failed to extract {}: {e}", entry.name));
+                    }
                 }
                 Err(e) => {
                     let _ = cliclack::log::warning(format!("Failed to pack {}: {e}", entry.name));
@@ -787,27 +829,11 @@ fn watch_and_reinstall(
             }
         }
 
-        // Cache clear — always include dependents of changed packages
-        let mut to_clear = changed_packages.clone();
-        for name in &changed_packages {
-            if let Some(dependents) = reverse_deps.get(name) {
-                for dep in dependents {
-                    if !to_clear.contains(dep) {
-                        to_clear.push(dep.clone());
-                    }
-                }
-            }
-        }
+        // Clear bundler caches
+        let extra: Vec<&std::path::Path> = workspace_pkg_dirs.iter().map(|p| p.as_path()).collect();
+        pm::clear_bundler_caches(consumer_dir, &extra);
 
-        spinner.start(format!("Clearing cache for {} package(s)...", to_clear.len()));
-        pm::clear_cache(pm, &to_clear, consumer_dir);
-        pm::clear_bundler_caches(consumer_dir);
-
-        spinner.start(format!("Running {} install...", style(pm.name()).green()));
-        match pm::run_install(pm, consumer_dir) {
-            Ok(()) => spinner.stop("Installed successfully"),
-            Err(e) => spinner.stop(format!("{}", style(format!("Install failed: {e}")).red())),
-        }
+        spinner.stop(format!("Smuggled {}", style(changed_packages.join(", ")).cyan()));
     }
 
     Ok(())

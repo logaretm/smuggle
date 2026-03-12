@@ -116,6 +116,11 @@ fn collect_files(pkg_dir: &Path, pkg_json: &PublishPackageJson) -> Result<Vec<Pa
     if let Some(file_patterns) = &pkg_json.files {
         // files field: whitelist mode
         for raw_pattern in file_patterns {
+            // Skip negation patterns (e.g. "!dist/types.d.ts")
+            if raw_pattern.starts_with('!') {
+                continue;
+            }
+
             // Patterns are always relative to package root — strip leading slashes
             let pattern = raw_pattern.trim_start_matches('/');
             let full_pattern = pkg_dir.join(pattern);

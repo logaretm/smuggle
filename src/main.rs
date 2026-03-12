@@ -729,20 +729,6 @@ fn watch_and_reinstall(
                 .watch(dir, RecursiveMode::Recursive)
                 .map_err(|e| format!("failed to watch {}: {e}", dir.display()))?;
         }
-        let display_dirs: Vec<String> = watch_dirs
-            .iter()
-            .map(|d| {
-                d.strip_prefix(&entry.source_dir)
-                    .unwrap_or(d)
-                    .display()
-                    .to_string()
-            })
-            .collect();
-        let _ = cliclack::log::remark(format!(
-            "{} -> {}",
-            style(&entry.name).dim(),
-            style(display_dirs.join(", ")).dim(),
-        ));
     }
 
     // Track tarball hashes to avoid unnecessary restarts
@@ -893,6 +879,11 @@ fn resolve_watch_dirs(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
     dirs.push(pkg_dir.to_path_buf());
 
     for pattern in files {
+        // Skip negation patterns (e.g. "!dist/types.d.ts")
+        if pattern.starts_with('!') {
+            continue;
+        }
+
         // Strip glob suffixes to get the base directory
         let clean: &str = pattern
             .trim_start_matches('/')

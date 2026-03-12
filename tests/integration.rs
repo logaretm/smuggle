@@ -710,6 +710,50 @@ fn workspace_install_multiple_apps_same_dep() {
     cleanup_store("@test-smug/ws-shared");
 }
 
+#[test]
+fn publish_skips_negation_patterns_in_files_field() {
+    let tmp = TempDir::new().unwrap();
+    let pkg_dir = tmp.path().join("pkg");
+
+    // files field with negation: include dist but exclude dist/internal.js
+    fs::create_dir_all(&pkg_dir).unwrap();
+    fs::write(
+        pkg_dir.join("package.json"),
+        r#"{
+  "name": "@test-smug/negation",
+  "version": "1.0.0",
+  "files": ["dist", "!dist/internal.js"]
+}"#,
+    )
+    .unwrap();
+
+    let dist = pkg_dir.join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(dist.join("index.js"), "public").unwrap();
+    fs::write(dist.join("internal.js"), "secret").unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&pkg_dir)
+        .assert()
+        .success();
+
+    let store = store_dir().join("@test-smug/negation");
+    let tarball = fs::read(store.join("package.tgz")).unwrap();
+    let entries = list_tarball_entries(&tarball);
+
+    // dist/index.js should be included
+    assert!(entries.contains(&"package/dist/index.js".to_string()));
+    // dist/internal.js should also be included — negation patterns are skipped
+    // (we don't exclude files, we just don't try to follow "!" as a path)
+    assert!(
+        entries.contains(&"package/dist/internal.js".to_string()),
+        "dist/internal.js should still be included since negation only prevents treating ! as a path, got: {entries:?}"
+    );
+    // The key thing: the publish should not crash trying to resolve "!dist/internal.js" as a path
+    cleanup_store("@test-smug/negation");
+}
+
 // ─── Tarball helpers ────────────────────────────────────────
 
 fn list_tarball_entries(tarball: &[u8]) -> Vec<String> {

@@ -76,10 +76,11 @@ impl ConsumerPackageJson {
             &self.dev_dependencies,
             &self.peer_dependencies,
             &self.optional_dependencies,
-        ] {
-            if let Some(m) = map {
-                names.extend(m.keys().cloned());
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            names.extend(map.keys().cloned());
         }
         names
     }

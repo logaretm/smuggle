@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 mod pack;
 mod pm;
 mod store;
@@ -5,7 +7,7 @@ mod workspace;
 
 use clap::{Parser, Subcommand};
 use console::style;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -100,7 +102,7 @@ fn main() {
     }
 }
 
-fn cmd_publish(pkg_dir: &PathBuf, select_all: bool) -> Result<(), String> {
+fn cmd_publish(pkg_dir: &Path, select_all: bool) -> Result<(), String> {
     let pkg_dir = pkg_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
@@ -139,13 +141,7 @@ fn publish_single_package(pkg_dir: &std::path::Path) -> Result<(), String> {
 
     let tarball = pack::pack(pkg_dir, &pkg_json)?;
 
-    store::save(
-        name,
-        version,
-        &pkg_dir.to_path_buf(),
-        &tarball,
-        &pkg_json.dependencies(),
-    )?;
+    store::save(name, version, pkg_dir, &tarball, &pkg_json.dependencies())?;
 
     spinner.stop(format!(
         "Published {} -> ~/.smuggle/packages/{name}/",
@@ -298,7 +294,7 @@ fn cmd_unpublish(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_install(consumer_dir: &PathBuf, select_all: bool) -> Result<(), String> {
+fn cmd_install(consumer_dir: &Path, select_all: bool) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;

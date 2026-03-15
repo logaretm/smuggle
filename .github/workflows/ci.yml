@@ -21,6 +21,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
       - name: Cache cargo registry & build
         uses: actions/cache@v4
         with:

@@ -1,7 +1,7 @@
 use console::style;
 use std::path::{Path, PathBuf};
 
-use crate::{pack, pm, store};
+use crate::{backup, pack, pm, store};
 
 /// A resolved target in node_modules to override with a local package.
 pub struct OverrideTarget {
@@ -109,14 +109,13 @@ pub fn watch_and_reinstall(
         let spinner = cliclack::spinner();
 
         // Re-pack and check if content actually changed
-        let mut actually_changed: Vec<String> = Vec::new();
+        spinner.start("Packing changed packages...");
+        let mut to_extract: Vec<(String, Vec<u8>, PathBuf)> = Vec::new();
         for pkg_name in &changed_packages {
             let entry = selected.iter().find(|e| &e.name == pkg_name).unwrap();
             let Some(target) = targets.iter().find(|t| t.name == *pkg_name) else {
                 continue;
             };
-
-            spinner.start(format!("Packing {}...", style(&entry.name).cyan()));
 
             let pkg_json_path = entry.source_dir.join("package.json");
             let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
@@ -149,19 +148,50 @@ pub fn watch_and_reinstall(
                         &pkg_json.dependencies(),
                     );
 
-                    spinner.start(format!("Smuggling {}...", style(&entry.name).cyan()));
-                    if let Err(e) = pack::extract_tarball_to(&tarball, &target.target_dir) {
-                        let _ = cliclack::log::warning(format!(
-                            "Failed to extract {}: {e}",
-                            entry.name
-                        ));
-                    } else {
-                        actually_changed.push(pkg_name.clone());
-                    }
+                    to_extract.push((pkg_name.clone(), tarball, target.target_dir.clone()));
                 }
                 Err(e) => {
                     let _ = cliclack::log::warning(format!("Failed to pack {}: {e}", entry.name));
                 }
+            }
+        }
+
+        // Transactional extraction: backup, extract all, rollback on failure
+        let mut actually_changed: Vec<String> = Vec::new();
+        if !to_extract.is_empty() {
+            let backup_pairs: Vec<(String, PathBuf)> = to_extract
+                .iter()
+                .map(|(name, _, target)| (name.clone(), target.clone()))
+                .collect();
+
+            let backup_base = match backup::backup_targets(&backup_pairs) {
+                Ok(b) => b,
+                Err(e) => {
+                    spinner.stop(format!("{} backup failed: {e}", style("✗").red()));
+                    continue;
+                }
+            };
+
+            spinner.start(format!("Smuggling {} package(s)...", to_extract.len()));
+            let mut failed = false;
+            for (pkg_name, tarball, target_dir) in &to_extract {
+                if let Err(e) = pack::extract_tarball_to(tarball, target_dir) {
+                    spinner.stop(format!(
+                        "{} extraction failed: {e} — rolling back",
+                        style("✗").red()
+                    ));
+                    backup::restore_all(&backup_base, &backup_pairs);
+                    failed = true;
+                    break;
+                }
+                actually_changed.push(pkg_name.clone());
+            }
+
+            if !failed {
+                // Extraction succeeded, remove backup
+                let _ = std::fs::remove_dir_all(&backup_base);
+            } else {
+                actually_changed.clear();
             }
         }
 

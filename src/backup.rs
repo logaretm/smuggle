@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Copy a directory tree, preserving structure.
 /// Skips nested node_modules (pnpm dep symlinks).
@@ -52,11 +53,15 @@ pub fn restore_dir(backup: &Path, target: &Path) -> Result<(), String> {
 }
 
 /// Back up a list of override targets to a temporary directory.
-/// Returns the backup base path.
+/// Returns the backup base path. Each call gets a unique directory
+/// so that watch-mode re-extractions don't collide with prior backups.
 pub fn backup_targets(targets: &[(String, PathBuf)]) -> Result<PathBuf, String> {
-    let backup_base = std::env::temp_dir()
-        .join("smuggle-backup")
-        .join(std::process::id().to_string());
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let backup_base =
+        std::env::temp_dir()
+            .join("smuggle-backup")
+            .join(format!("{}-{}", std::process::id(), id));
     std::fs::create_dir_all(&backup_base)
         .map_err(|e| format!("failed to create backup dir: {e}"))?;
 

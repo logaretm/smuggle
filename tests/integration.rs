@@ -478,9 +478,10 @@ fn install_once_exits_cleanly() {
 
     let tmp = TempDir::new().unwrap();
 
-    // Create and publish a local version of villus
+    // Create and publish a local version of klona (use a different package than
+    // install_end_to_end to avoid store collisions when tests run in parallel)
     let pkg_dir = tmp.path().join("my-lib");
-    create_package(&pkg_dir, "villus", "4.0.0", &["dist"], "");
+    create_package(&pkg_dir, "klona", "3.0.0", &["dist"], "");
     let dist = pkg_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
     fs::write(
@@ -495,11 +496,11 @@ fn install_once_exits_cleanly() {
         .assert()
         .success();
 
-    // Create a consumer that depends on villus
+    // Create a consumer that depends on klona
     let consumer_dir = tmp.path().join("app");
-    create_consumer(&consumer_dir, &[("villus", "^3.0.0")]);
+    create_consumer(&consumer_dir, &[("klona", "^2.0.0")]);
 
-    // Run npm install to create node_modules with the real villus
+    // Run npm install to create node_modules with the real klona
     let npm_install = std::process::Command::new("npm")
         .args(["install"])
         .current_dir(&consumer_dir)
@@ -523,7 +524,7 @@ fn install_once_exits_cleanly() {
     // Verify the smuggled package replaced the real one
     let installed = consumer_dir
         .join("node_modules")
-        .join("villus")
+        .join("klona")
         .join("dist")
         .join("index.js");
     assert!(
@@ -534,7 +535,7 @@ fn install_once_exits_cleanly() {
     let content = fs::read_to_string(&installed).unwrap();
     assert_eq!(content, "module.exports = { smuggled: true };");
 
-    cleanup_store("villus");
+    cleanup_store("klona");
 }
 
 #[test]
@@ -590,6 +591,164 @@ fn install_scoped_npmrc() {
     child.wait().unwrap();
 
     cleanup_store("@test-smug/scoped-a");
+}
+
+// ─── Transactional rollback ──────────────────────────────────
+
+/// Best-effort permission restore for test cleanup.
+fn restore_permissions(dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
+    let mut perms = match fs::metadata(dir) {
+        Ok(m) => m.permissions(),
+        Err(_) => return,
+    };
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    let _ = fs::set_permissions(dir, perms.clone());
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let _ = fs::set_permissions(entry.path(), perms.clone());
+        }
+    }
+}
+
+#[test]
+fn install_rolls_back_on_extraction_failure() {
+    // Simulate a multi-package install where one target is read-only,
+    // causing extraction to fail. All packages should be restored.
+    if std::process::Command::new("npm")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping install_rolls_back_on_extraction_failure: npm not available");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+
+    // Create and publish two local packages
+    let lib_a_dir = tmp.path().join("lib-a");
+    create_package(&lib_a_dir, "@test-smug/rollback-a", "1.0.0", &["dist"], "");
+    let dist_a = lib_a_dir.join("dist");
+    fs::create_dir_all(&dist_a).unwrap();
+    fs::write(dist_a.join("index.js"), "smuggled-a").unwrap();
+
+    let lib_b_dir = tmp.path().join("lib-b");
+    create_package(&lib_b_dir, "@test-smug/rollback-b", "1.0.0", &["dist"], "");
+    let dist_b = lib_b_dir.join("dist");
+    fs::create_dir_all(&dist_b).unwrap();
+    fs::write(dist_b.join("index.js"), "smuggled-b").unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&lib_a_dir)
+        .assert()
+        .success();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&lib_b_dir)
+        .assert()
+        .success();
+
+    // Create consumer that depends on both packages
+    let consumer_dir = tmp.path().join("app");
+    create_consumer(
+        &consumer_dir,
+        &[
+            ("@test-smug/rollback-a", "^1.0.0"),
+            ("@test-smug/rollback-b", "^1.0.0"),
+        ],
+    );
+
+    // Manually create node_modules with the "original" packages
+    let nm = consumer_dir.join("node_modules");
+    let nm_a = nm.join("@test-smug").join("rollback-a");
+    let nm_b = nm.join("@test-smug").join("rollback-b");
+    fs::create_dir_all(&nm_a).unwrap();
+    fs::create_dir_all(&nm_b).unwrap();
+    fs::write(
+        nm_a.join("package.json"),
+        r#"{"name":"@test-smug/rollback-a","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(nm_a.join("index.js"), "original-a").unwrap();
+    fs::write(
+        nm_b.join("package.json"),
+        r#"{"name":"@test-smug/rollback-b","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(nm_b.join("index.js"), "original-b").unwrap();
+
+    // Make the second package's directory read-only so extraction fails
+    let mut perms = fs::metadata(&nm_b).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&nm_b, perms.clone()).unwrap();
+
+    // Also make files inside read-only
+    for entry in fs::read_dir(&nm_b).unwrap() {
+        let entry = entry.unwrap();
+        let mut fp = fs::metadata(entry.path()).unwrap().permissions();
+        fp.set_readonly(true);
+        fs::set_permissions(entry.path(), fp).unwrap();
+    }
+
+    // Run smuggle install --all; it should fail and rollback.
+    // Use spawn + wait_with_output with a timeout to avoid hanging if
+    // the read-only trick doesn't cause a failure on some platform.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("smuggle"))
+        .args(["install", "--all", "--path"])
+        .arg(&consumer_dir)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Wait up to 30 seconds — the command should exit quickly on failure
+    let timeout = std::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            child.kill().unwrap();
+            let _ = child.wait();
+            // Restore permissions before panicking
+            restore_permissions(&nm_b);
+            panic!(
+                "smuggle install did not exit within timeout — extraction may not have failed on this platform"
+            );
+        }
+        match child.try_wait().unwrap() {
+            Some(_) => break,
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Restore permissions before assertions so cleanup works
+    restore_permissions(&nm_b);
+
+    assert!(
+        !output.status.success(),
+        "expected install to fail, got success. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("install aborted") || stderr.contains("Rolling back"),
+        "expected rollback message, got: {stderr}"
+    );
+
+    // Verify the first package was restored to its original content
+    let content_a = fs::read_to_string(nm_a.join("index.js")).unwrap();
+    assert_eq!(
+        content_a, "original-a",
+        "package A should have been rolled back to original"
+    );
+
+    cleanup_store("@test-smug/rollback-a");
+    cleanup_store("@test-smug/rollback-b");
 }
 
 // ─── Workspace Install ──────────────────────────────────────

@@ -270,13 +270,17 @@ fn run_install_flow(
         .collect();
     backup::setup_ctrlc_restore(backup_base.clone(), cleanup_targets);
 
-    // Extract tarballs into node_modules
+    // Extract tarballs into node_modules (transactional: rollback all on failure)
     let extract_spinner = cliclack::spinner();
     extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
 
-    for target in &targets {
-        let tarball = store::load_tarball(&target.name)?;
-        pack::extract_tarball_to(&tarball, &target.target_dir)?;
+    if let Err(e) = extract_all(&targets) {
+        extract_spinner.stop(format!("{} extraction failed: {e}", style("✗").red()));
+        let restore_spinner = cliclack::spinner();
+        restore_spinner.start("Rolling back all packages...");
+        backup::restore_all(&backup_base, &backup_pairs);
+        restore_spinner.stop("Rolled back all packages to originals");
+        return Err(format!("install aborted: {e}"));
     }
 
     extract_spinner.stop(format!(
@@ -356,6 +360,15 @@ fn resolve_targets(
     }
 
     Ok(targets)
+}
+
+/// Extract all tarballs into their targets. Returns an error on the first failure.
+fn extract_all(targets: &[watch::OverrideTarget]) -> Result<(), String> {
+    for target in targets {
+        let tarball = store::load_tarball(&target.name)?;
+        pack::extract_tarball_to(&tarball, &target.target_dir)?;
+    }
+    Ok(())
 }
 
 /// Expand the selected set to include any registered packages that are

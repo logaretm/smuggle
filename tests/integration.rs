@@ -465,6 +465,79 @@ fn install_end_to_end() {
 }
 
 #[test]
+fn install_once_exits_cleanly() {
+    // This test requires npm to be available
+    if std::process::Command::new("npm")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping install_once_exits_cleanly: npm not available");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+
+    // Create and publish a local version of villus
+    let pkg_dir = tmp.path().join("my-lib");
+    create_package(&pkg_dir, "villus", "4.0.0", &["dist"], "");
+    let dist = pkg_dir.join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(
+        dist.join("index.js"),
+        "module.exports = { smuggled: true };",
+    )
+    .unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&pkg_dir)
+        .assert()
+        .success();
+
+    // Create a consumer that depends on villus
+    let consumer_dir = tmp.path().join("app");
+    create_consumer(&consumer_dir, &[("villus", "^3.0.0")]);
+
+    // Run npm install to create node_modules with the real villus
+    let npm_install = std::process::Command::new("npm")
+        .args(["install"])
+        .current_dir(&consumer_dir)
+        .output()
+        .expect("npm install failed");
+    assert!(
+        npm_install.status.success(),
+        "npm install failed: {}",
+        String::from_utf8_lossy(&npm_install.stderr)
+    );
+
+    // Run smuggle install --once (should exit immediately, no watch mode)
+    smuggle()
+        .args(["install", "--all", "--once", "--path"])
+        .arg(&consumer_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Watching for changes").not())
+        .stderr(predicate::str::contains("Done"));
+
+    // Verify the smuggled package replaced the real one
+    let installed = consumer_dir
+        .join("node_modules")
+        .join("villus")
+        .join("dist")
+        .join("index.js");
+    assert!(
+        installed.exists(),
+        "expected installed file at {}",
+        installed.display()
+    );
+    let content = fs::read_to_string(&installed).unwrap();
+    assert_eq!(content, "module.exports = { smuggled: true };");
+
+    cleanup_store("villus");
+}
+
+#[test]
 fn install_scoped_npmrc() {
     // Verify that when all packages share a scope, .npmrc uses scoped registry
     if std::process::Command::new("npm")

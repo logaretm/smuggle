@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 
 use crate::{backup, pack, pm, store, watch, workspace};
 
-pub fn cmd_install(consumer_dir: &Path, select_all: bool) -> Result<(), String> {
+pub fn cmd_install(consumer_dir: &Path, select_all: bool, once: bool) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
     // Detect workspace (pnpm or yarn)
     if let Some(ws) = workspace::detect_workspace(&consumer_dir) {
-        return cmd_install_workspace(&consumer_dir, ws, select_all);
+        return cmd_install_workspace(&consumer_dir, ws, select_all, once);
     }
 
     let pkg_json_path = consumer_dir.join("package.json");
@@ -84,13 +84,14 @@ pub fn cmd_install(consumer_dir: &Path, select_all: bool) -> Result<(), String> 
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(&consumer_dir, &selected, &[])
+    run_install_flow(&consumer_dir, &selected, &[], once)
 }
 
 fn cmd_install_workspace(
     root: &Path,
     ws: workspace::DetectedWorkspace,
     select_all: bool,
+    once: bool,
 ) -> Result<(), String> {
     let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
 
@@ -187,7 +188,7 @@ fn cmd_install_workspace(
         .iter()
         .map(|wp| wp.path.clone())
         .collect();
-    run_install_flow(root, &selected, &ws_dirs)
+    run_install_flow(root, &selected, &ws_dirs, once)
 }
 
 /// Shared install flow: expand deps, overwrite in node_modules, watch for changes.
@@ -196,6 +197,7 @@ fn run_install_flow(
     install_dir: &Path,
     selected: &[&store::StoreEntry],
     workspace_pkg_dirs: &[PathBuf],
+    once: bool,
 ) -> Result<(), String> {
     // Expand: include registered transitive dependencies
     let registered = store::list();
@@ -225,6 +227,26 @@ fn run_install_flow(
 
     if targets.is_empty() {
         return Err("none of the selected packages are installed in node_modules".into());
+    }
+
+    if once {
+        // One-shot mode: swap and exit, no backup/restore, no cache clearing, no watch
+        let extract_spinner = cliclack::spinner();
+        extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
+
+        for target in &targets {
+            let tarball = store::load_tarball(&target.name)?;
+            pack::extract_tarball_to(&tarball, &target.target_dir)?;
+        }
+
+        extract_spinner.stop(format!(
+            "Smuggled {} package(s) into node_modules",
+            style(targets.len()).green()
+        ));
+
+        let _ = cliclack::outro("Done");
+
+        return Ok(());
     }
 
     // Backup original directories

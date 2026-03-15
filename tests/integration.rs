@@ -478,9 +478,10 @@ fn install_once_exits_cleanly() {
 
     let tmp = TempDir::new().unwrap();
 
-    // Create and publish a local version of villus
+    // Create and publish a local version of klona (use a different package than
+    // install_end_to_end to avoid store collisions when tests run in parallel)
     let pkg_dir = tmp.path().join("my-lib");
-    create_package(&pkg_dir, "villus", "4.0.0", &["dist"], "");
+    create_package(&pkg_dir, "klona", "3.0.0", &["dist"], "");
     let dist = pkg_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
     fs::write(
@@ -495,11 +496,11 @@ fn install_once_exits_cleanly() {
         .assert()
         .success();
 
-    // Create a consumer that depends on villus
+    // Create a consumer that depends on klona
     let consumer_dir = tmp.path().join("app");
-    create_consumer(&consumer_dir, &[("villus", "^3.0.0")]);
+    create_consumer(&consumer_dir, &[("klona", "^2.0.0")]);
 
-    // Run npm install to create node_modules with the real villus
+    // Run npm install to create node_modules with the real klona
     let npm_install = std::process::Command::new("npm")
         .args(["install"])
         .current_dir(&consumer_dir)
@@ -523,7 +524,7 @@ fn install_once_exits_cleanly() {
     // Verify the smuggled package replaced the real one
     let installed = consumer_dir
         .join("node_modules")
-        .join("villus")
+        .join("klona")
         .join("dist")
         .join("index.js");
     assert!(
@@ -534,7 +535,7 @@ fn install_once_exits_cleanly() {
     let content = fs::read_to_string(&installed).unwrap();
     assert_eq!(content, "module.exports = { smuggled: true };");
 
-    cleanup_store("villus");
+    cleanup_store("klona");
 }
 
 #[test]

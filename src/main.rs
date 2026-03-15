@@ -107,9 +107,9 @@ fn cmd_publish(pkg_dir: &Path, select_all: bool) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
-    // Check for pnpm workspace
-    if let Some(workspace_packages) = workspace::detect_pnpm_workspace(&pkg_dir) {
-        return cmd_publish_workspace(&pkg_dir, workspace_packages, select_all);
+    // Check for workspace (pnpm or yarn)
+    if let Some(ws) = workspace::detect_workspace(&pkg_dir) {
+        return cmd_publish_workspace(&pkg_dir, ws, select_all);
     }
 
     // Single package publish
@@ -152,85 +152,47 @@ fn publish_single_package(pkg_dir: &std::path::Path) -> Result<(), String> {
 }
 
 fn cmd_publish_workspace(
-    root: &std::path::Path,
-    packages: Vec<workspace::WorkspacePackage>,
+    _root: &std::path::Path,
+    ws: workspace::DetectedWorkspace,
     select_all: bool,
 ) -> Result<(), String> {
     let _ = cliclack::intro(style(" smuggle publish ").on_cyan().black());
 
-    cliclack::log::info("Detected pnpm workspace").map_err(|e| e.to_string())?;
+    cliclack::log::info(format!("Detected {} workspace", ws.kind)).map_err(|e| e.to_string())?;
+
+    // Filter out the root package and private packages — they're never publishable
+    let packages: Vec<workspace::WorkspacePackage> =
+        ws.packages.into_iter().filter(|p| !p.is_root && !p.is_private).collect();
 
     if packages.is_empty() {
-        return Err("no packages found in workspace".into());
+        return Err("no publishable packages found in workspace".into());
     }
 
-    let selected_indices: Vec<usize> = if select_all {
-        let selected: Vec<usize> = packages
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.is_private)
-            .map(|(i, _)| i)
-            .collect();
-
-        let list: Vec<String> = selected
-            .iter()
-            .map(|&i| {
-                let p = &packages[i];
-                let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
-                format!(
-                    "{} @ {} ({})",
-                    style(&p.name).cyan(),
-                    p.version,
-                    rel.display()
-                )
-            })
-            .collect();
-
-        cliclack::log::info(format!(
-            "Selecting all {} publishable package(s)\n{}",
-            selected.len(),
-            list.join("\n"),
-        ))
-        .map_err(|e| e.to_string())?;
-
-        selected
+    let initial: Vec<usize> = if select_all {
+        (0..packages.len()).collect()
     } else {
-        let mut prompt = cliclack::multiselect("Select packages to publish");
-
-        for (i, p) in packages.iter().enumerate() {
-            let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
-            let suffix = if p.is_root { " (root)" } else { "" };
-            let private_tag = if p.is_private { " [private]" } else { "" };
-            let label = format!(
-                "{} @ {} ({}){}{}",
-                p.name,
-                p.version,
-                rel.display(),
-                suffix,
-                private_tag
-            );
-            prompt = prompt.item(i, label, "");
-        }
-
-        let defaults: Vec<usize> = packages
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.is_private)
-            .map(|(i, _)| i)
-            .collect();
-        prompt = prompt.initial_values(defaults);
-
-        let selections: Vec<usize> = prompt
-            .interact()
-            .map_err(|e| format!("selection cancelled: {e}"))?;
-
-        if selections.is_empty() {
-            let _ = cliclack::outro("No packages selected, nothing to do.");
-            return Ok(());
-        }
-
-        selections
+        vec![]
     };
+
+    let mut prompt = cliclack::multiselect(format!(
+        "Select packages to publish {}",
+        style("(space to toggle, enter to confirm)").dim()
+    ));
+
+    for (i, p) in packages.iter().enumerate() {
+        prompt = prompt.item(i, &p.name, "");
+    }
+
+    prompt = prompt.initial_values(initial);
+
+    let selected_indices: Vec<usize> = prompt
+        .interact()
+        .map_err(|e| format!("selection cancelled: {e}"))?;
+
+    if selected_indices.is_empty() {
+        let _ = cliclack::outro("No packages selected, nothing to do.");
+        return Ok(());
+    }
 
     // Publish each selected package
     let mut published = 0;
@@ -299,9 +261,9 @@ fn cmd_install(consumer_dir: &Path, select_all: bool) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
-    // Detect pnpm workspace
-    if let Some(workspace_packages) = workspace::detect_pnpm_workspace(&consumer_dir) {
-        return cmd_install_workspace(&consumer_dir, workspace_packages, select_all);
+    // Detect workspace (pnpm or yarn)
+    if let Some(ws) = workspace::detect_workspace(&consumer_dir) {
+        return cmd_install_workspace(&consumer_dir, ws, select_all);
     }
 
     let pkg_json_path = consumer_dir.join("package.json");
@@ -380,12 +342,14 @@ fn cmd_install(consumer_dir: &Path, select_all: bool) -> Result<(), String> {
 
 fn cmd_install_workspace(
     root: &std::path::Path,
-    workspace_packages: Vec<workspace::WorkspacePackage>,
+    ws: workspace::DetectedWorkspace,
     select_all: bool,
 ) -> Result<(), String> {
     let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
 
-    cliclack::log::info("Detected pnpm workspace").map_err(|e| e.to_string())?;
+    cliclack::log::info(format!("Detected {} workspace", ws.kind)).map_err(|e| e.to_string())?;
+
+    let workspace_packages = ws.packages;
 
     let registered = store::list();
     if registered.is_empty() {

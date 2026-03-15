@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,9 +16,52 @@ pub struct WorkspacePackage {
     pub is_private: bool,
 }
 
+/// Which workspace manager was detected.
+pub enum WorkspaceKind {
+    Pnpm,
+    Yarn,
+    Npm,
+}
+
+impl std::fmt::Display for WorkspaceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkspaceKind::Pnpm => write!(f, "pnpm"),
+            WorkspaceKind::Yarn => write!(f, "yarn"),
+            WorkspaceKind::Npm => write!(f, "npm"),
+        }
+    }
+}
+
+pub struct DetectedWorkspace {
+    pub kind: WorkspaceKind,
+    pub packages: Vec<WorkspacePackage>,
+}
+
+/// Detect any supported workspace (pnpm or yarn classic) and return all workspace packages.
+/// Returns None if not a workspace root.
+pub fn detect_workspace(dir: &Path) -> Option<DetectedWorkspace> {
+    if let Some(packages) = detect_pnpm_workspace(dir) {
+        return Some(DetectedWorkspace {
+            kind: WorkspaceKind::Pnpm,
+            packages,
+        });
+    }
+
+    if let Some(packages) = detect_package_json_workspace(dir) {
+        let kind = if dir.join("yarn.lock").exists() {
+            WorkspaceKind::Yarn
+        } else {
+            WorkspaceKind::Npm
+        };
+        return Some(DetectedWorkspace { kind, packages });
+    }
+
+    None
+}
+
 /// Detect pnpm workspace and return all workspace packages.
-/// Returns None if not a pnpm workspace root.
-pub fn detect_pnpm_workspace(dir: &Path) -> Option<Vec<WorkspacePackage>> {
+fn detect_pnpm_workspace(dir: &Path) -> Option<Vec<WorkspacePackage>> {
     let workspace_yaml = dir.join("pnpm-workspace.yaml");
     if !workspace_yaml.exists() {
         return None;
@@ -39,6 +83,61 @@ pub fn detect_pnpm_workspace(dir: &Path) -> Option<Vec<WorkspacePackage>> {
 
     // Resolve each glob pattern
     for glob in &globs {
+        resolve_workspace_glob(dir, glob, &mut packages);
+    }
+
+    Some(packages)
+}
+
+/// Minimal struct for reading workspace globs from root package.json.
+#[derive(Deserialize)]
+struct WorkspaceRootPackageJson {
+    #[serde(default)]
+    workspaces: Option<WorkspacesField>,
+}
+
+/// Yarn classic workspaces can be either an array of globs or an object with a `packages` field.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WorkspacesField {
+    /// Simple form: `"workspaces": ["packages/*"]`
+    Array(Vec<String>),
+    /// Object form: `"workspaces": { "packages": ["packages/*"] }`
+    Object { packages: Vec<String> },
+}
+
+impl WorkspacesField {
+    fn globs(&self) -> &[String] {
+        match self {
+            WorkspacesField::Array(v) => v,
+            WorkspacesField::Object { packages } => packages,
+        }
+    }
+}
+
+/// Detect a package.json-based workspace (yarn or npm) and return all workspace packages.
+/// Both use the `workspaces` field in the root package.json.
+fn detect_package_json_workspace(dir: &Path) -> Option<Vec<WorkspacePackage>> {
+    let pkg_json_path = dir.join("package.json");
+    let content = fs::read_to_string(&pkg_json_path).ok()?;
+    let root: WorkspaceRootPackageJson = serde_json::from_str(&content).ok()?;
+
+    let workspaces = root.workspaces?;
+    let globs = workspaces.globs();
+
+    if globs.is_empty() {
+        return None;
+    }
+
+    let mut packages = Vec::new();
+
+    // Add root package if it has a name
+    if let Some(root_pkg) = read_workspace_package(dir, true) {
+        packages.push(root_pkg);
+    }
+
+    // Resolve each glob pattern
+    for glob in globs {
         resolve_workspace_glob(dir, glob, &mut packages);
     }
 
@@ -222,5 +321,109 @@ other:
     fn parse_empty_packages() {
         let yaml = "packages:\n";
         assert!(parse_workspace_yaml(yaml).is_empty());
+    }
+
+    #[test]
+    fn yarn_workspaces_array_form() {
+        let json = r#"{ "name": "root", "workspaces": ["packages/*", "libs/*"] }"#;
+        let root: WorkspaceRootPackageJson = serde_json::from_str(json).unwrap();
+        let globs = root.workspaces.unwrap();
+        assert_eq!(globs.globs(), &["packages/*", "libs/*"]);
+    }
+
+    #[test]
+    fn yarn_workspaces_object_form() {
+        let json = r#"{ "name": "root", "workspaces": { "packages": ["packages/*"] } }"#;
+        let root: WorkspaceRootPackageJson = serde_json::from_str(json).unwrap();
+        let globs = root.workspaces.unwrap();
+        assert_eq!(globs.globs(), &["packages/*"]);
+    }
+
+    #[test]
+    fn yarn_workspaces_missing() {
+        let json = r#"{ "name": "root" }"#;
+        let root: WorkspaceRootPackageJson = serde_json::from_str(json).unwrap();
+        assert!(root.workspaces.is_none());
+    }
+
+    #[test]
+    fn detect_npm_workspace_from_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create root package.json with workspaces field (no yarn.lock → npm)
+        fs::write(
+            root.join("package.json"),
+            r#"{ "name": "my-monorepo", "private": true, "workspaces": ["packages/*"] }"#,
+        ).unwrap();
+
+        // Create a workspace member
+        let pkg_dir = root.join("packages").join("my-lib");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(
+            pkg_dir.join("package.json"),
+            r#"{ "name": "@scope/my-lib", "version": "1.0.0" }"#,
+        ).unwrap();
+
+        let ws = detect_workspace(root).expect("should detect npm workspace");
+        assert!(matches!(ws.kind, WorkspaceKind::Npm));
+        assert_eq!(ws.packages.len(), 2); // root + my-lib
+
+        let member = ws.packages.iter().find(|p| !p.is_root).unwrap();
+        assert_eq!(member.name, "@scope/my-lib");
+        assert_eq!(member.version, "1.0.0");
+    }
+
+    #[test]
+    fn detect_yarn_workspace_with_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create root package.json with workspaces field + yarn.lock → yarn
+        fs::write(
+            root.join("package.json"),
+            r#"{ "name": "my-monorepo", "private": true, "workspaces": ["packages/*"] }"#,
+        ).unwrap();
+        fs::write(root.join("yarn.lock"), "").unwrap();
+
+        // Create a workspace member
+        let pkg_dir = root.join("packages").join("my-lib");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(
+            pkg_dir.join("package.json"),
+            r#"{ "name": "my-lib", "version": "1.0.0" }"#,
+        ).unwrap();
+
+        let ws = detect_workspace(root).expect("should detect yarn workspace");
+        assert!(matches!(ws.kind, WorkspaceKind::Yarn));
+    }
+
+    #[test]
+    fn pnpm_takes_priority_over_yarn() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create root package.json with workspaces field (yarn)
+        fs::write(
+            root.join("package.json"),
+            r#"{ "name": "my-monorepo", "private": true, "workspaces": ["packages/*"] }"#,
+        ).unwrap();
+
+        // Also create pnpm-workspace.yaml
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        ).unwrap();
+
+        // Create a workspace member
+        let pkg_dir = root.join("packages").join("my-lib");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(
+            pkg_dir.join("package.json"),
+            r#"{ "name": "my-lib", "version": "1.0.0" }"#,
+        ).unwrap();
+
+        let ws = detect_workspace(root).expect("should detect workspace");
+        assert!(matches!(ws.kind, WorkspaceKind::Pnpm));
     }
 }

@@ -392,12 +392,16 @@ fn install_end_to_end() {
 
     let tmp = TempDir::new().unwrap();
 
-    // Create and publish a package
+    // Create and publish a local version of villus (a real package we can npm-install)
     let pkg_dir = tmp.path().join("my-lib");
-    create_package(&pkg_dir, "@test-smug/e2e-lib", "1.0.0", &["dist"], "");
+    create_package(&pkg_dir, "villus", "4.0.0", &["dist"], "");
     let dist = pkg_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
-    fs::write(dist.join("index.js"), "module.exports = { e2e: true };").unwrap();
+    fs::write(
+        dist.join("index.js"),
+        "module.exports = { smuggled: true };",
+    )
+    .unwrap();
 
     smuggle()
         .args(["publish", "--path"])
@@ -405,11 +409,23 @@ fn install_end_to_end() {
         .assert()
         .success();
 
-    // Create a consumer that depends on it
+    // Create a consumer that depends on villus
     let consumer_dir = tmp.path().join("app");
-    create_consumer(&consumer_dir, &[("@test-smug/e2e-lib", "^1.0.0")]);
+    create_consumer(&consumer_dir, &[("villus", "^3.0.0")]);
 
-    // Run install in background (it enters watch mode), kill after install completes
+    // Run npm install to create node_modules with the real villus
+    let npm_install = std::process::Command::new("npm")
+        .args(["install"])
+        .current_dir(&consumer_dir)
+        .output()
+        .expect("npm install failed");
+    assert!(
+        npm_install.status.success(),
+        "npm install failed: {}",
+        String::from_utf8_lossy(&npm_install.stderr)
+    );
+
+    // Run smuggle install in background (it enters watch mode), kill after install completes
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("smuggle"))
         .args(["install", "--all", "--path"])
         .arg(&consumer_dir)
@@ -431,11 +447,10 @@ fn install_end_to_end() {
         "expected watch message, got: {stderr}"
     );
 
-    // Verify the package was installed
+    // Verify the smuggled package overwrote the real one
     let installed = consumer_dir
         .join("node_modules")
-        .join("@test-smug")
-        .join("e2e-lib")
+        .join("villus")
         .join("dist")
         .join("index.js");
     assert!(
@@ -444,13 +459,9 @@ fn install_end_to_end() {
         installed.display()
     );
     let content = fs::read_to_string(&installed).unwrap();
-    assert_eq!(content, "module.exports = { e2e: true };");
+    assert_eq!(content, "module.exports = { smuggled: true };");
 
-    // Verify .npmrc was cleaned up (ctrlc handler may not fire on kill,
-    // but let's check the file was created during the run)
-    // The npmrc check is best-effort since kill doesn't trigger cleanup
-
-    cleanup_store("@test-smug/e2e-lib");
+    cleanup_store("villus");
 }
 
 #[test]

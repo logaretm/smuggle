@@ -355,7 +355,8 @@ other:
         fs::write(
             root.join("package.json"),
             r#"{ "name": "my-monorepo", "private": true, "workspaces": ["packages/*"] }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create a workspace member
         let pkg_dir = root.join("packages").join("my-lib");
@@ -363,7 +364,8 @@ other:
         fs::write(
             pkg_dir.join("package.json"),
             r#"{ "name": "@scope/my-lib", "version": "1.0.0" }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let ws = detect_workspace(root).expect("should detect npm workspace");
         assert!(matches!(ws.kind, WorkspaceKind::Npm));
@@ -383,7 +385,8 @@ other:
         fs::write(
             root.join("package.json"),
             r#"{ "name": "my-monorepo", "private": true, "workspaces": ["packages/*"] }"#,
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(root.join("yarn.lock"), "").unwrap();
 
         // Create a workspace member
@@ -392,7 +395,8 @@ other:
         fs::write(
             pkg_dir.join("package.json"),
             r#"{ "name": "my-lib", "version": "1.0.0" }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let ws = detect_workspace(root).expect("should detect yarn workspace");
         assert!(matches!(ws.kind, WorkspaceKind::Yarn));
@@ -407,13 +411,15 @@ other:
         fs::write(
             root.join("package.json"),
             r#"{ "name": "my-monorepo", "private": true, "workspaces": ["packages/*"] }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Also create pnpm-workspace.yaml
         fs::write(
             root.join("pnpm-workspace.yaml"),
             "packages:\n  - packages/*\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create a workspace member
         let pkg_dir = root.join("packages").join("my-lib");
@@ -421,7 +427,8 @@ other:
         fs::write(
             pkg_dir.join("package.json"),
             r#"{ "name": "my-lib", "version": "1.0.0" }"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let ws = detect_workspace(root).expect("should detect workspace");
         assert!(matches!(ws.kind, WorkspaceKind::Pnpm));

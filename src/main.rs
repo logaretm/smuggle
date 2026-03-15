@@ -161,8 +161,11 @@ fn cmd_publish_workspace(
     cliclack::log::info(format!("Detected {} workspace", ws.kind)).map_err(|e| e.to_string())?;
 
     // Filter out the root package and private packages — they're never publishable
-    let packages: Vec<workspace::WorkspacePackage> =
-        ws.packages.into_iter().filter(|p| !p.is_root && !p.is_private).collect();
+    let packages: Vec<workspace::WorkspacePackage> = ws
+        .packages
+        .into_iter()
+        .filter(|p| !p.is_root && !p.is_private)
+        .collect();
 
     if packages.is_empty() {
         return Err("no publishable packages found in workspace".into());

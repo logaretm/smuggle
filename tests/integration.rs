@@ -592,6 +592,132 @@ fn install_scoped_npmrc() {
     cleanup_store("@test-smug/scoped-a");
 }
 
+// ─── Transactional rollback ──────────────────────────────────
+
+#[test]
+fn install_rolls_back_on_extraction_failure() {
+    // Simulate a multi-package install where one target is read-only,
+    // causing extraction to fail. All packages should be restored.
+    if std::process::Command::new("npm")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping install_rolls_back_on_extraction_failure: npm not available");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+
+    // Create and publish two local packages
+    let lib_a_dir = tmp.path().join("lib-a");
+    create_package(&lib_a_dir, "@test-smug/rollback-a", "1.0.0", &["dist"], "");
+    let dist_a = lib_a_dir.join("dist");
+    fs::create_dir_all(&dist_a).unwrap();
+    fs::write(dist_a.join("index.js"), "smuggled-a").unwrap();
+
+    let lib_b_dir = tmp.path().join("lib-b");
+    create_package(&lib_b_dir, "@test-smug/rollback-b", "1.0.0", &["dist"], "");
+    let dist_b = lib_b_dir.join("dist");
+    fs::create_dir_all(&dist_b).unwrap();
+    fs::write(dist_b.join("index.js"), "smuggled-b").unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&lib_a_dir)
+        .assert()
+        .success();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&lib_b_dir)
+        .assert()
+        .success();
+
+    // Create consumer that depends on both packages
+    let consumer_dir = tmp.path().join("app");
+    create_consumer(
+        &consumer_dir,
+        &[
+            ("@test-smug/rollback-a", "^1.0.0"),
+            ("@test-smug/rollback-b", "^1.0.0"),
+        ],
+    );
+
+    // Manually create node_modules with the "original" packages
+    let nm = consumer_dir.join("node_modules");
+    let nm_a = nm.join("@test-smug").join("rollback-a");
+    let nm_b = nm.join("@test-smug").join("rollback-b");
+    fs::create_dir_all(&nm_a).unwrap();
+    fs::create_dir_all(&nm_b).unwrap();
+    fs::write(
+        nm_a.join("package.json"),
+        r#"{"name":"@test-smug/rollback-a","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(nm_a.join("index.js"), "original-a").unwrap();
+    fs::write(
+        nm_b.join("package.json"),
+        r#"{"name":"@test-smug/rollback-b","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(nm_b.join("index.js"), "original-b").unwrap();
+
+    // Make the second package's directory read-only so extraction fails
+    let mut perms = fs::metadata(&nm_b).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&nm_b, perms.clone()).unwrap();
+
+    // Also make files inside read-only
+    for entry in fs::read_dir(&nm_b).unwrap() {
+        let entry = entry.unwrap();
+        let mut fp = fs::metadata(entry.path()).unwrap().permissions();
+        fp.set_readonly(true);
+        fs::set_permissions(entry.path(), fp).unwrap();
+    }
+
+    // Run smuggle install --all; it should fail and rollback
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin!("smuggle"))
+        .args(["install", "--all", "--path"])
+        .arg(&consumer_dir)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Restore permissions before assertions so cleanup works
+    let mut perms_rw = perms.clone();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms_rw.set_readonly(false);
+    // Directory might have been restored, but ensure cleanup can happen
+    if nm_b.exists() {
+        let _ = fs::set_permissions(&nm_b, perms_rw.clone());
+        for entry in fs::read_dir(&nm_b).unwrap_or_else(|_| fs::read_dir(&nm_b).unwrap()) {
+            let entry = entry.unwrap();
+            let _ = fs::set_permissions(entry.path(), perms_rw.clone());
+        }
+    }
+
+    assert!(
+        !output.status.success(),
+        "expected install to fail, got success. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("install aborted") || stderr.contains("Rolling back"),
+        "expected rollback message, got: {stderr}"
+    );
+
+    // Verify the first package was restored to its original content
+    let content_a = fs::read_to_string(nm_a.join("index.js")).unwrap();
+    assert_eq!(
+        content_a, "original-a",
+        "package A should have been rolled back to original"
+    );
+
+    cleanup_store("@test-smug/rollback-a");
+    cleanup_store("@test-smug/rollback-b");
+}
+
 // ─── Workspace Install ──────────────────────────────────────
 
 fn create_pnpm_workspace(root: &Path, globs: &[&str]) {

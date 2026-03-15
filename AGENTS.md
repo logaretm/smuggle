@@ -19,12 +19,21 @@ A CLI tool that lets you test local npm packages in consumer projects by directl
 - **Backup/restore**: Original `node_modules` contents are backed up to a temp dir before overwriting and restored on exit (both ctrl-c and normal).
 - **Hash-based change detection**: On watch, tarballs are hashed before/after repacking. Cache busting and vite restarts only happen when content actually changes.
 
-## Build and test
+## Build, test, format, and lint
 
 ```sh
 cargo build
 cargo test
 cargo install --path .
+
+# Format code
+cargo fmt
+
+# Check formatting (CI uses this)
+cargo fmt -- --check
+
+# Lint with clippy (CI treats warnings as errors)
+cargo clippy -- -D warnings
 ```
 
 Tests use the `@test-smug/` scope to avoid conflicts. Integration tests that need a package manager check for availability and skip if not found.

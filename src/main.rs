@@ -183,7 +183,8 @@ fn cmd_publish_workspace(
     ));
 
     for (i, p) in packages.iter().enumerate() {
-        prompt = prompt.item(i, &p.name, "");
+        let label = format!("{} @ {}", p.name, p.version);
+        prompt = prompt.item(i, label, "");
     }
 
     prompt = prompt.initial_values(initial);

@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 
 use crate::{backup, pack, pm, store, watch, workspace};
 
-pub fn cmd_install(consumer_dir: &Path, select_all: bool) -> Result<(), String> {
+pub fn cmd_install(consumer_dir: &Path, select_all: bool, strict: bool) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
     // Detect workspace (pnpm or yarn)
     if let Some(ws) = workspace::detect_workspace(&consumer_dir) {
-        return cmd_install_workspace(&consumer_dir, ws, select_all);
+        return cmd_install_workspace(&consumer_dir, ws, select_all, strict);
     }
 
     let pkg_json_path = consumer_dir.join("package.json");
@@ -84,13 +84,14 @@ pub fn cmd_install(consumer_dir: &Path, select_all: bool) -> Result<(), String> 
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(&consumer_dir, &selected, &[])
+    run_install_flow(&consumer_dir, &selected, &[], strict)
 }
 
 fn cmd_install_workspace(
     root: &Path,
     ws: workspace::DetectedWorkspace,
     select_all: bool,
+    strict: bool,
 ) -> Result<(), String> {
     let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
 
@@ -187,7 +188,7 @@ fn cmd_install_workspace(
         .iter()
         .map(|wp| wp.path.clone())
         .collect();
-    run_install_flow(root, &selected, &ws_dirs)
+    run_install_flow(root, &selected, &ws_dirs, strict)
 }
 
 /// Shared install flow: expand deps, overwrite in node_modules, watch for changes.
@@ -196,6 +197,7 @@ fn run_install_flow(
     install_dir: &Path,
     selected: &[&store::StoreEntry],
     workspace_pkg_dirs: &[PathBuf],
+    strict: bool,
 ) -> Result<(), String> {
     // Expand: include registered transitive dependencies
     let registered = store::list();
@@ -225,6 +227,17 @@ fn run_install_flow(
 
     if targets.is_empty() {
         return Err("none of the selected packages are installed in node_modules".into());
+    }
+
+    // Check for version mismatches before any changes
+    let mismatches = check_version_mismatches(&all_refs, &targets);
+    if !mismatches.is_empty() {
+        for msg in &mismatches {
+            let _ = cliclack::log::warning(msg.clone());
+        }
+        if strict {
+            return Err("version mismatch detected (--strict mode)".into());
+        }
     }
 
     // Backup original directories
@@ -369,4 +382,36 @@ fn expand_with_registered_deps(
         .collect();
     result.sort_by(|a, b| a.name.cmp(&b.name));
     result
+}
+
+/// Read the version from an installed package's package.json in node_modules.
+fn read_installed_version(target_dir: &Path) -> Option<String> {
+    let pkg_json_path = target_dir.join("package.json");
+    let raw = std::fs::read_to_string(&pkg_json_path).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed["version"].as_str().map(|s| s.to_string())
+}
+
+/// Compare local (store) versions against installed (node_modules) versions.
+/// Returns a list of warning messages for each mismatch.
+fn check_version_mismatches(
+    entries: &[&store::StoreEntry],
+    targets: &[watch::OverrideTarget],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for entry in entries {
+        let Some(target) = targets.iter().find(|t| t.name == entry.name) else {
+            continue;
+        };
+        let Some(installed_version) = read_installed_version(&target.target_dir) else {
+            continue;
+        };
+        if entry.version != installed_version {
+            warnings.push(format!(
+                "\u{26a0} {}: local version {} differs from installed {}",
+                entry.name, entry.version, installed_version
+            ));
+        }
+    }
+    warnings
 }

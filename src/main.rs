@@ -62,6 +62,10 @@ enum Commands {
         /// Select all matching packages without prompting
         #[arg(long)]
         all: bool,
+
+        /// Treat version mismatches between local and installed packages as errors
+        #[arg(long)]
+        strict: bool,
     },
 }
 
@@ -85,12 +89,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Commands::Install { path, all }) => {
+        Some(Commands::Install { path, all, strict }) => {
             let consumer_dir = path
                 .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             let all = all || cli.all;
-            if let Err(e) = install::cmd_install(&consumer_dir, all) {
+            if let Err(e) = install::cmd_install(&consumer_dir, all, strict) {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
@@ -98,7 +102,7 @@ fn main() {
         None => {
             // bare `smuggle` = `smuggle install`
             let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            if let Err(e) = install::cmd_install(&consumer_dir, cli.all) {
+            if let Err(e) = install::cmd_install(&consumer_dir, cli.all, false) {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }

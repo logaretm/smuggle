@@ -1,5 +1,5 @@
-use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
@@ -249,11 +249,7 @@ fn publish_fails_without_package_json() {
 #[test]
 fn publish_fails_without_name() {
     let tmp = TempDir::new().unwrap();
-    fs::write(
-        tmp.path().join("package.json"),
-        r#"{"version": "1.0.0"}"#,
-    )
-    .unwrap();
+    fs::write(tmp.path().join("package.json"), r#"{"version": "1.0.0"}"#).unwrap();
 
     smuggle()
         .args(["publish", "--path"])
@@ -266,11 +262,7 @@ fn publish_fails_without_name() {
 #[test]
 fn publish_fails_without_version() {
     let tmp = TempDir::new().unwrap();
-    fs::write(
-        tmp.path().join("package.json"),
-        r#"{"name": "test"}"#,
-    )
-    .unwrap();
+    fs::write(tmp.path().join("package.json"), r#"{"name": "test"}"#).unwrap();
 
     smuggle()
         .args(["publish", "--path"])
@@ -402,13 +394,7 @@ fn install_end_to_end() {
 
     // Create and publish a package
     let pkg_dir = tmp.path().join("my-lib");
-    create_package(
-        &pkg_dir,
-        "@test-smug/e2e-lib",
-        "1.0.0",
-        &["dist"],
-        "",
-    );
+    create_package(&pkg_dir, "@test-smug/e2e-lib", "1.0.0", &["dist"], "");
     let dist = pkg_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
     fs::write(dist.join("index.js"), "module.exports = { e2e: true };").unwrap();
@@ -482,13 +468,7 @@ fn install_scoped_npmrc() {
     let tmp = TempDir::new().unwrap();
 
     let pkg_dir = tmp.path().join("pkg");
-    create_package(
-        &pkg_dir,
-        "@test-smug/scoped-a",
-        "1.0.0",
-        &["dist"],
-        "",
-    );
+    create_package(&pkg_dir, "@test-smug/scoped-a", "1.0.0", &["dist"], "");
     let dist = pkg_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
     fs::write(dist.join("index.js"), "a").unwrap();
@@ -548,13 +528,7 @@ fn workspace_install_detects_proxied_deps() {
 
     // Publish a package first
     let lib_dir = tmp.path().join("lib");
-    create_package(
-        &lib_dir,
-        "@test-smug/ws-lib",
-        "2.0.0",
-        &["dist"],
-        "",
-    );
+    create_package(&lib_dir, "@test-smug/ws-lib", "2.0.0", &["dist"], "");
     let dist = lib_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
     fs::write(dist.join("index.js"), "module.exports = 'ws-lib';").unwrap();
@@ -644,13 +618,7 @@ fn workspace_install_multiple_apps_same_dep() {
 
     // Publish
     let lib_dir = tmp.path().join("lib");
-    create_package(
-        &lib_dir,
-        "@test-smug/ws-shared",
-        "1.0.0",
-        &["dist"],
-        "",
-    );
+    create_package(&lib_dir, "@test-smug/ws-shared", "1.0.0", &["dist"], "");
     let dist = lib_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
     fs::write(dist.join("index.js"), "shared").unwrap();

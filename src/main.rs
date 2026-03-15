@@ -29,6 +29,10 @@ struct Cli {
     /// Select all matching packages without prompting
     #[arg(long, global = true)]
     all: bool,
+
+    /// Swap packages once and exit without watching for changes
+    #[arg(long, global = true)]
+    once: bool,
 }
 
 #[derive(Subcommand)]
@@ -62,6 +66,10 @@ enum Commands {
         /// Select all matching packages without prompting
         #[arg(long)]
         all: bool,
+
+        /// Swap packages once and exit without watching for changes
+        #[arg(long)]
+        once: bool,
     },
 }
 
@@ -85,12 +93,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Commands::Install { path, all }) => {
+        Some(Commands::Install { path, all, once }) => {
             let consumer_dir = path
                 .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             let all = all || cli.all;
-            if let Err(e) = install::cmd_install(&consumer_dir, all) {
+            let once = once || cli.once;
+            if let Err(e) = install::cmd_install(&consumer_dir, all, once) {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
@@ -98,7 +107,7 @@ fn main() {
         None => {
             // bare `smuggle` = `smuggle install`
             let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            if let Err(e) = install::cmd_install(&consumer_dir, cli.all) {
+            if let Err(e) = install::cmd_install(&consumer_dir, cli.all, cli.once) {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }

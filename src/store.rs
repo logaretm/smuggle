@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn store_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -24,7 +24,7 @@ pub struct StoreEntry {
 pub fn save(
     name: &str,
     version: &str,
-    source_dir: &PathBuf,
+    source_dir: &Path,
     tarball: &[u8],
     dependencies: &HashMap<String, String>,
 ) -> Result<(), String> {
@@ -39,7 +39,7 @@ pub fn save(
     let meta = StoreEntry {
         name: name.to_string(),
         version: version.to_string(),
-        source_dir: source_dir.clone(),
+        source_dir: source_dir.to_path_buf(),
         dependencies: dependencies.clone(),
     };
     let meta_path = dir.join("metadata.json");

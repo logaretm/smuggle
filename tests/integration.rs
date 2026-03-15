@@ -1,5 +1,5 @@
-use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
@@ -249,11 +249,7 @@ fn publish_fails_without_package_json() {
 #[test]
 fn publish_fails_without_name() {
     let tmp = TempDir::new().unwrap();
-    fs::write(
-        tmp.path().join("package.json"),
-        r#"{"version": "1.0.0"}"#,
-    )
-    .unwrap();
+    fs::write(tmp.path().join("package.json"), r#"{"version": "1.0.0"}"#).unwrap();
 
     smuggle()
         .args(["publish", "--path"])
@@ -266,11 +262,7 @@ fn publish_fails_without_name() {
 #[test]
 fn publish_fails_without_version() {
     let tmp = TempDir::new().unwrap();
-    fs::write(
-        tmp.path().join("package.json"),
-        r#"{"name": "test"}"#,
-    )
-    .unwrap();
+    fs::write(tmp.path().join("package.json"), r#"{"name": "test"}"#).unwrap();
 
     smuggle()
         .args(["publish", "--path"])
@@ -400,18 +392,16 @@ fn install_end_to_end() {
 
     let tmp = TempDir::new().unwrap();
 
-    // Create and publish a package
+    // Create and publish a local version of villus (a real package we can npm-install)
     let pkg_dir = tmp.path().join("my-lib");
-    create_package(
-        &pkg_dir,
-        "@test-smug/e2e-lib",
-        "1.0.0",
-        &["dist"],
-        "",
-    );
+    create_package(&pkg_dir, "villus", "4.0.0", &["dist"], "");
     let dist = pkg_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
-    fs::write(dist.join("index.js"), "module.exports = { e2e: true };").unwrap();
+    fs::write(
+        dist.join("index.js"),
+        "module.exports = { smuggled: true };",
+    )
+    .unwrap();
 
     smuggle()
         .args(["publish", "--path"])
@@ -419,11 +409,23 @@ fn install_end_to_end() {
         .assert()
         .success();
 
-    // Create a consumer that depends on it
+    // Create a consumer that depends on villus
     let consumer_dir = tmp.path().join("app");
-    create_consumer(&consumer_dir, &[("@test-smug/e2e-lib", "^1.0.0")]);
+    create_consumer(&consumer_dir, &[("villus", "^3.0.0")]);
 
-    // Run install in background (it enters watch mode), kill after install completes
+    // Run npm install to create node_modules with the real villus
+    let npm_install = std::process::Command::new("npm")
+        .args(["install"])
+        .current_dir(&consumer_dir)
+        .output()
+        .expect("npm install failed");
+    assert!(
+        npm_install.status.success(),
+        "npm install failed: {}",
+        String::from_utf8_lossy(&npm_install.stderr)
+    );
+
+    // Run smuggle install in background (it enters watch mode), kill after install completes
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("smuggle"))
         .args(["install", "--all", "--path"])
         .arg(&consumer_dir)
@@ -445,11 +447,10 @@ fn install_end_to_end() {
         "expected watch message, got: {stderr}"
     );
 
-    // Verify the package was installed
+    // Verify the smuggled package overwrote the real one
     let installed = consumer_dir
         .join("node_modules")
-        .join("@test-smug")
-        .join("e2e-lib")
+        .join("villus")
         .join("dist")
         .join("index.js");
     assert!(
@@ -458,13 +459,9 @@ fn install_end_to_end() {
         installed.display()
     );
     let content = fs::read_to_string(&installed).unwrap();
-    assert_eq!(content, "module.exports = { e2e: true };");
+    assert_eq!(content, "module.exports = { smuggled: true };");
 
-    // Verify .npmrc was cleaned up (ctrlc handler may not fire on kill,
-    // but let's check the file was created during the run)
-    // The npmrc check is best-effort since kill doesn't trigger cleanup
-
-    cleanup_store("@test-smug/e2e-lib");
+    cleanup_store("villus");
 }
 
 #[test]
@@ -482,13 +479,7 @@ fn install_scoped_npmrc() {
     let tmp = TempDir::new().unwrap();
 
     let pkg_dir = tmp.path().join("pkg");
-    create_package(
-        &pkg_dir,
-        "@test-smug/scoped-a",
-        "1.0.0",
-        &["dist"],
-        "",
-    );
+    create_package(&pkg_dir, "@test-smug/scoped-a", "1.0.0", &["dist"], "");
     let dist = pkg_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
     fs::write(dist.join("index.js"), "a").unwrap();
@@ -548,13 +539,7 @@ fn workspace_install_detects_proxied_deps() {
 
     // Publish a package first
     let lib_dir = tmp.path().join("lib");
-    create_package(
-        &lib_dir,
-        "@test-smug/ws-lib",
-        "2.0.0",
-        &["dist"],
-        "",
-    );
+    create_package(&lib_dir, "@test-smug/ws-lib", "2.0.0", &["dist"], "");
     let dist = lib_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
     fs::write(dist.join("index.js"), "module.exports = 'ws-lib';").unwrap();
@@ -644,13 +629,7 @@ fn workspace_install_multiple_apps_same_dep() {
 
     // Publish
     let lib_dir = tmp.path().join("lib");
-    create_package(
-        &lib_dir,
-        "@test-smug/ws-shared",
-        "1.0.0",
-        &["dist"],
-        "",
-    );
+    create_package(&lib_dir, "@test-smug/ws-shared", "1.0.0", &["dist"], "");
     let dist = lib_dir.join("dist");
     fs::create_dir_all(&dist).unwrap();
     fs::write(dist.join("index.js"), "shared").unwrap();

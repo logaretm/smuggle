@@ -73,8 +73,7 @@ fn parse_workspace_yaml(content: &str) -> Vec<String> {
         }
 
         // Stop if we hit another top-level key
-        if in_packages && !line.starts_with(' ') && !line.starts_with('\t') && !trimmed.is_empty()
-        {
+        if in_packages && !line.starts_with(' ') && !line.starts_with('\t') && !trimmed.is_empty() {
             break;
         }
 
@@ -85,11 +84,7 @@ fn parse_workspace_yaml(content: &str) -> Vec<String> {
                 let value = value
                     .strip_prefix('"')
                     .and_then(|v| v.strip_suffix('"'))
-                    .or_else(|| {
-                        value
-                            .strip_prefix('\'')
-                            .and_then(|v| v.strip_suffix('\''))
-                    })
+                    .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
                     .unwrap_or(value);
 
                 if !value.is_empty() {

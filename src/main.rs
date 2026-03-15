@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 mod pack;
 mod pm;
 mod store;
@@ -5,7 +7,7 @@ mod workspace;
 
 use clap::{Parser, Subcommand};
 use console::style;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -80,7 +82,8 @@ fn main() {
             }
         }
         Some(Commands::Install { path, all }) => {
-            let consumer_dir = path.or(cli.path)
+            let consumer_dir = path
+                .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             let all = all || cli.all;
             if let Err(e) = cmd_install(&consumer_dir, all) {
@@ -90,8 +93,7 @@ fn main() {
         }
         None => {
             // bare `smuggle` = `smuggle install`
-            let consumer_dir = cli.path
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
             if let Err(e) = cmd_install(&consumer_dir, cli.all) {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
@@ -100,7 +102,7 @@ fn main() {
     }
 }
 
-fn cmd_publish(pkg_dir: &PathBuf, select_all: bool) -> Result<(), String> {
+fn cmd_publish(pkg_dir: &Path, select_all: bool) -> Result<(), String> {
     let pkg_dir = pkg_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
@@ -139,7 +141,7 @@ fn publish_single_package(pkg_dir: &std::path::Path) -> Result<(), String> {
 
     let tarball = pack::pack(pkg_dir, &pkg_json)?;
 
-    store::save(name, version, &pkg_dir.to_path_buf(), &tarball, &pkg_json.dependencies())?;
+    store::save(name, version, pkg_dir, &tarball, &pkg_json.dependencies())?;
 
     spinner.stop(format!(
         "Published {} -> ~/.smuggle/packages/{name}/",
@@ -175,7 +177,12 @@ fn cmd_publish_workspace(
             .map(|&i| {
                 let p = &packages[i];
                 let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
-                format!("{} @ {} ({})", style(&p.name).cyan(), p.version, rel.display())
+                format!(
+                    "{} @ {} ({})",
+                    style(&p.name).cyan(),
+                    p.version,
+                    rel.display()
+                )
             })
             .collect();
 
@@ -183,7 +190,8 @@ fn cmd_publish_workspace(
             "Selecting all {} publishable package(s)\n{}",
             selected.len(),
             list.join("\n"),
-        )).map_err(|e| e.to_string())?;
+        ))
+        .map_err(|e| e.to_string())?;
 
         selected
     } else {
@@ -193,7 +201,14 @@ fn cmd_publish_workspace(
             let rel = p.path.strip_prefix(root).unwrap_or(&p.path);
             let suffix = if p.is_root { " (root)" } else { "" };
             let private_tag = if p.is_private { " [private]" } else { "" };
-            let label = format!("{} @ {} ({}){}{}", p.name, p.version, rel.display(), suffix, private_tag);
+            let label = format!(
+                "{} @ {} ({}){}{}",
+                p.name,
+                p.version,
+                rel.display(),
+                suffix,
+                private_tag
+            );
             prompt = prompt.item(i, label, "");
         }
 
@@ -234,7 +249,10 @@ fn cmd_publish_workspace(
     }
 
     if errors.is_empty() {
-        let _ = cliclack::outro(format!("Published {} package(s)", style(published).green().bold()));
+        let _ = cliclack::outro(format!(
+            "Published {} package(s)",
+            style(published).green().bold()
+        ));
     } else {
         let _ = cliclack::outro(format!(
             "Published {} package(s), {} failed",
@@ -276,7 +294,7 @@ fn cmd_unpublish(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_install(consumer_dir: &PathBuf, select_all: bool) -> Result<(), String> {
+fn cmd_install(consumer_dir: &Path, select_all: bool) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
@@ -293,10 +311,9 @@ fn cmd_install(consumer_dir: &PathBuf, select_all: bool) -> Result<(), String> {
 
     let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
 
-    let consumer_pkg: pack::ConsumerPackageJson = serde_json::from_str(
-        &std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("failed to parse consumer package.json: {e}"))?;
+    let consumer_pkg: pack::ConsumerPackageJson =
+        serde_json::from_str(&std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("failed to parse consumer package.json: {e}"))?;
 
     let all_deps = consumer_pkg.all_dependency_names();
 
@@ -318,13 +335,21 @@ fn cmd_install(consumer_dir: &PathBuf, select_all: bool) -> Result<(), String> {
     let selected: Vec<&store::StoreEntry> = if select_all {
         let list: Vec<String> = matches
             .iter()
-            .map(|e| format!("{} @ {} ({})", style(&e.name).cyan(), e.version, e.source_dir.display()))
+            .map(|e| {
+                format!(
+                    "{} @ {} ({})",
+                    style(&e.name).cyan(),
+                    e.version,
+                    e.source_dir.display()
+                )
+            })
             .collect();
         cliclack::log::info(format!(
             "Selecting all {} matching package(s)\n{}",
             matches.len(),
             list.join("\n"),
-        )).map_err(|e| e.to_string())?;
+        ))
+        .map_err(|e| e.to_string())?;
         matches.clone()
     } else {
         let mut prompt = cliclack::multiselect("Select packages to proxy locally");
@@ -364,9 +389,7 @@ fn cmd_install_workspace(
 
     let registered = store::list();
     if registered.is_empty() {
-        return Err(
-            "no registered packages. publish some first with `smuggle publish`.".into(),
-        );
+        return Err("no registered packages. publish some first with `smuggle publish`.".into());
     }
 
     // Collect deps from all workspace packages and track which workspace pkg uses which proxied dep
@@ -422,7 +445,8 @@ fn cmd_install_workspace(
             matches.len(),
             workspace_dep_map.len(),
             lines.join("\n"),
-        )).map_err(|e| e.to_string())?;
+        ))
+        .map_err(|e| e.to_string())?;
         matches.clone()
     } else {
         let mut prompt = cliclack::multiselect("Select packages to proxy locally");
@@ -448,7 +472,10 @@ fn cmd_install_workspace(
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    let ws_dirs: Vec<PathBuf> = workspace_packages.iter().map(|wp| wp.path.clone()).collect();
+    let ws_dirs: Vec<PathBuf> = workspace_packages
+        .iter()
+        .map(|wp| wp.path.clone())
+        .collect();
     run_install_flow(root, &selected, &ws_dirs)
 }
 
@@ -473,8 +500,13 @@ fn run_install_flow(
         cliclack::log::info(format!(
             "Also proxying {} transitive dep(s): {}",
             extra.len(),
-            extra.iter().map(|n| style(n).cyan().to_string()).collect::<Vec<_>>().join(", "),
-        )).map_err(|e| e.to_string())?;
+            extra
+                .iter()
+                .map(|n| style(n).cyan().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ))
+        .map_err(|e| e.to_string())?;
     }
 
     // Resolve each package's location in node_modules.
@@ -501,7 +533,8 @@ fn run_install_flow(
                 continue;
             }
             // Resolve symlinks (pnpm uses symlinks to .pnpm virtual store)
-            let real_path = pkg_path.canonicalize()
+            let real_path = pkg_path
+                .canonicalize()
                 .map_err(|e| format!("failed to resolve {}: {e}", pkg_path.display()))?;
 
             // Avoid duplicates (pnpm workspace members may resolve to the same .pnpm path)
@@ -571,15 +604,21 @@ fn run_install_flow(
         pack::extract_tarball_to(&tarball, &target.target_dir)?;
     }
 
-    extract_spinner.stop(format!("Smuggled {} package(s) into node_modules", style(targets.len()).green()));
+    extract_spinner.stop(format!(
+        "Smuggled {} package(s) into node_modules",
+        style(targets.len()).green()
+    ));
 
     // Clear bundler caches and trigger vite restart
     let extra: Vec<&std::path::Path> = workspace_pkg_dirs.iter().map(|p| p.as_path()).collect();
     pm::clear_bundler_caches(install_dir, &extra);
     touch_vite_configs(install_dir, workspace_pkg_dirs);
 
-    cliclack::log::success(format!("Watching for changes... {}", style("(ctrl-c to stop)").dim()))
-        .map_err(|e| e.to_string())?;
+    cliclack::log::success(format!(
+        "Watching for changes... {}",
+        style("(ctrl-c to stop)").dim()
+    ))
+    .map_err(|e| e.to_string())?;
 
     // Watch for changes
     watch_and_reinstall(&all_refs, &targets, install_dir, workspace_pkg_dirs)?;
@@ -693,7 +732,6 @@ fn expand_with_registered_deps(
     result
 }
 
-
 fn watch_and_reinstall(
     selected: &[&store::StoreEntry],
     targets: &[OverrideTarget],
@@ -804,11 +842,13 @@ fn watch_and_reinstall(
 
             let pkg_json_path = entry.source_dir.join("package.json");
             let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
-                let _ = cliclack::log::warning(format!("Could not read {}", pkg_json_path.display()));
+                let _ =
+                    cliclack::log::warning(format!("Could not read {}", pkg_json_path.display()));
                 continue;
             };
             let Ok(pkg_json) = serde_json::from_str::<pack::PublishPackageJson>(&raw) else {
-                let _ = cliclack::log::warning(format!("Could not parse {}", pkg_json_path.display()));
+                let _ =
+                    cliclack::log::warning(format!("Could not parse {}", pkg_json_path.display()));
                 continue;
             };
 
@@ -823,11 +863,20 @@ fn watch_and_reinstall(
 
                     last_hashes.insert(pkg_name.clone(), new_hash);
                     let version = pkg_json.version.as_deref().unwrap_or("0.0.0");
-                    let _ = store::save(&entry.name, version, &entry.source_dir, &tarball, &pkg_json.dependencies());
+                    let _ = store::save(
+                        &entry.name,
+                        version,
+                        &entry.source_dir,
+                        &tarball,
+                        &pkg_json.dependencies(),
+                    );
 
                     spinner.start(format!("Smuggling {}...", style(&entry.name).cyan()));
                     if let Err(e) = pack::extract_tarball_to(&tarball, &target.target_dir) {
-                        let _ = cliclack::log::warning(format!("Failed to extract {}: {e}", entry.name));
+                        let _ = cliclack::log::warning(format!(
+                            "Failed to extract {}: {e}",
+                            entry.name
+                        ));
                     } else {
                         actually_changed.push(pkg_name.clone());
                     }
@@ -848,7 +897,10 @@ fn watch_and_reinstall(
         pm::clear_bundler_caches(consumer_dir, &extra);
         touch_vite_configs(consumer_dir, workspace_pkg_dirs);
 
-        spinner.stop(format!("Smuggled {}", style(actually_changed.join(", ")).cyan()));
+        spinner.stop(format!(
+            "Smuggled {}",
+            style(actually_changed.join(", ")).cyan()
+        ));
     }
 
     Ok(())
@@ -922,7 +974,9 @@ fn resolve_watch_dirs(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
     // Remove subdirectories if a parent is already watched
     let mut filtered = Vec::new();
     for dir in &dirs {
-        let dominated = filtered.iter().any(|parent: &PathBuf| dir.starts_with(parent) && dir != parent);
+        let dominated = filtered
+            .iter()
+            .any(|parent: &PathBuf| dir.starts_with(parent) && dir != parent);
         if !dominated {
             // Also remove any existing entries that this new dir is a parent of
             filtered.retain(|existing: &PathBuf| !existing.starts_with(dir) || existing == dir);
@@ -936,7 +990,12 @@ fn resolve_watch_dirs(pkg_dir: &std::path::Path) -> Vec<PathBuf> {
 /// Touch vite config files to trigger a dev server restart.
 /// Checks root and all workspace member directories.
 fn touch_vite_configs(root: &std::path::Path, workspace_pkg_dirs: &[PathBuf]) {
-    let config_names = ["vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"];
+    let config_names = [
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mts",
+        "vite.config.mjs",
+    ];
 
     let mut dirs = vec![root.to_path_buf()];
     dirs.extend_from_slice(workspace_pkg_dirs);

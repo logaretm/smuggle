@@ -1,5 +1,5 @@
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use ignore::gitignore::GitignoreBuilder;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -76,10 +76,11 @@ impl ConsumerPackageJson {
             &self.dev_dependencies,
             &self.peer_dependencies,
             &self.optional_dependencies,
-        ] {
-            if let Some(m) = map {
-                names.extend(m.keys().cloned());
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            names.extend(map.keys().cloned());
         }
         names
     }
@@ -273,11 +274,7 @@ fn matches_simple_glob(pattern: &str, path: &str) -> bool {
     path == pattern
 }
 
-fn collect_dir_recursive(
-    dir: &Path,
-    base: &Path,
-    files: &mut Vec<PathBuf>,
-) -> Result<(), String> {
+fn collect_dir_recursive(dir: &Path, base: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Ok(());
     };
@@ -300,16 +297,17 @@ fn collect_dir_recursive(
     Ok(())
 }
 
-fn collect_entry_points(
-    pkg_dir: &Path,
-    pkg_json: &PublishPackageJson,
-    files: &mut Vec<PathBuf>,
-) {
+fn collect_entry_points(pkg_dir: &Path, pkg_json: &PublishPackageJson, files: &mut Vec<PathBuf>) {
     // Collect paths from main, module, types, typings
-    for path_str in [&pkg_json.main, &pkg_json.module, &pkg_json.types, &pkg_json.typings]
-        .iter()
-        .copied()
-        .flatten()
+    for path_str in [
+        &pkg_json.main,
+        &pkg_json.module,
+        &pkg_json.types,
+        &pkg_json.typings,
+    ]
+    .iter()
+    .copied()
+    .flatten()
     {
         let p = PathBuf::from(path_str);
         if pkg_dir.join(&p).exists() {
@@ -346,11 +344,7 @@ fn collect_entry_points(
     }
 }
 
-fn collect_export_paths(
-    pkg_dir: &Path,
-    value: &serde_json::Value,
-    files: &mut Vec<PathBuf>,
-) {
+fn collect_export_paths(pkg_dir: &Path, value: &serde_json::Value, files: &mut Vec<PathBuf>) {
     match value {
         serde_json::Value::String(s) => {
             if s.starts_with("./") || s.starts_with("../") {
@@ -461,8 +455,8 @@ pub fn pack(pkg_dir: &Path, pkg_json: &PublishPackageJson) -> Result<Vec<u8>, St
             header.set_mtime(0); // Reproducible builds
             header.set_cksum();
 
-            let content =
-                fs::read(&abs_path).map_err(|e| format!("failed to read {}: {e}", rel_path.display()))?;
+            let content = fs::read(&abs_path)
+                .map_err(|e| format!("failed to read {}: {e}", rel_path.display()))?;
 
             tar.append_data(&mut header, &tar_path, content.as_slice())
                 .map_err(|e| format!("failed to add {} to tarball: {e}", rel_path.display()))?;
@@ -471,7 +465,9 @@ pub fn pack(pkg_dir: &Path, pkg_json: &PublishPackageJson) -> Result<Vec<u8>, St
         tar.finish()
             .map_err(|e| format!("failed to finalize tarball: {e}"))?;
 
-        let encoder = tar.into_inner().map_err(|e| format!("encoder error: {e}"))?;
+        let encoder = tar
+            .into_inner()
+            .map_err(|e| format!("encoder error: {e}"))?;
         encoder
             .finish()
             .map_err(|e| format!("gzip finish error: {e}"))?;
@@ -489,10 +485,16 @@ pub fn extract_tarball_to(tarball: &[u8], target_dir: &Path) -> Result<(), Strin
     let decoder = GzDecoder::new(tarball);
     let mut archive = tar::Archive::new(decoder);
 
-    for entry in archive.entries().map_err(|e| format!("tar read error: {e}"))? {
+    for entry in archive
+        .entries()
+        .map_err(|e| format!("tar read error: {e}"))?
+    {
         let mut entry = entry.map_err(|e| format!("tar entry error: {e}"))?;
 
-        let path = entry.path().map_err(|e| format!("tar path error: {e}"))?.into_owned();
+        let path = entry
+            .path()
+            .map_err(|e| format!("tar path error: {e}"))?
+            .into_owned();
 
         // Strip "package/" prefix
         let rel = path.strip_prefix("package").unwrap_or(&path);
@@ -504,14 +506,14 @@ pub fn extract_tarball_to(tarball: &[u8], target_dir: &Path) -> Result<(), Strin
         let target = target_dir.join(rel);
 
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
 
         // Remove existing file to break hard links (pnpm uses hard links)
         let _ = fs::remove_file(&target);
 
-        entry.unpack(&target)
+        entry
+            .unpack(&target)
             .map_err(|e| format!("extract {}: {e}", rel.display()))?;
     }
 

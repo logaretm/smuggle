@@ -594,6 +594,25 @@ fn install_scoped_npmrc() {
 
 // ─── Transactional rollback ──────────────────────────────────
 
+/// Best-effort permission restore for test cleanup.
+fn restore_permissions(dir: &Path) {
+    if !dir.exists() {
+        return;
+    }
+    let mut perms = match fs::metadata(dir) {
+        Ok(m) => m.permissions(),
+        Err(_) => return,
+    };
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    let _ = fs::set_permissions(dir, perms.clone());
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let _ = fs::set_permissions(entry.path(), perms.clone());
+        }
+    }
+}
+
 #[test]
 fn install_rolls_back_on_extraction_failure() {
     // Simulate a multi-package install where one target is read-only,
@@ -676,27 +695,40 @@ fn install_rolls_back_on_extraction_failure() {
         fs::set_permissions(entry.path(), fp).unwrap();
     }
 
-    // Run smuggle install --all; it should fail and rollback
-    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin!("smuggle"))
+    // Run smuggle install --all; it should fail and rollback.
+    // Use spawn + wait_with_output with a timeout to avoid hanging if
+    // the read-only trick doesn't cause a failure on some platform.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("smuggle"))
         .args(["install", "--all", "--path"])
         .arg(&consumer_dir)
-        .output()
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
 
+    // Wait up to 30 seconds — the command should exit quickly on failure
+    let timeout = std::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            child.kill().unwrap();
+            let _ = child.wait();
+            // Restore permissions before panicking
+            restore_permissions(&nm_b);
+            panic!(
+                "smuggle install did not exit within timeout — extraction may not have failed on this platform"
+            );
+        }
+        match child.try_wait().unwrap() {
+            Some(_) => break,
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+
+    let output = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Restore permissions before assertions so cleanup works
-    let mut perms_rw = perms.clone();
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms_rw.set_readonly(false);
-    // Directory might have been restored, but ensure cleanup can happen
-    if nm_b.exists() {
-        let _ = fs::set_permissions(&nm_b, perms_rw.clone());
-        for entry in fs::read_dir(&nm_b).unwrap_or_else(|_| fs::read_dir(&nm_b).unwrap()) {
-            let entry = entry.unwrap();
-            let _ = fs::set_permissions(entry.path(), perms_rw.clone());
-        }
-    }
+    restore_permissions(&nm_b);
 
     assert!(
         !output.status.success(),

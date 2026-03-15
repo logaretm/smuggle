@@ -167,8 +167,7 @@ pub fn watch_and_reinstall(
             let backup_base = match backup::backup_targets(&backup_pairs) {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ =
-                        cliclack::log::warning(format!("Failed to backup for re-extraction: {e}"));
+                    spinner.stop(format!("{} backup failed: {e}", style("✗").red()));
                     continue;
                 }
             };
@@ -177,8 +176,9 @@ pub fn watch_and_reinstall(
             let mut failed = false;
             for (pkg_name, tarball, target_dir) in &to_extract {
                 if let Err(e) = pack::extract_tarball_to(tarball, target_dir) {
-                    let _ = cliclack::log::warning(format!(
-                        "Failed to extract {pkg_name}: {e} — rolling back"
+                    spinner.stop(format!(
+                        "{} extraction failed: {e} — rolling back",
+                        style("✗").red()
                     ));
                     backup::restore_all(&backup_base, &backup_pairs);
                     failed = true;

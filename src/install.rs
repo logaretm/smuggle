@@ -275,10 +275,7 @@ fn run_install_flow(
     extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
 
     if let Err(e) = extract_all(&targets) {
-        extract_spinner.stop(format!(
-            "{} extraction failed: {e}",
-            style("✗").red()
-        ));
+        extract_spinner.stop(format!("{} extraction failed: {e}", style("✗").red()));
         let restore_spinner = cliclack::spinner();
         restore_spinner.start("Rolling back all packages...");
         backup::restore_all(&backup_base, &backup_pairs);

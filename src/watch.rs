@@ -167,7 +167,8 @@ pub fn watch_and_reinstall(
             let backup_base = match backup::backup_targets(&backup_pairs) {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = cliclack::log::warning(format!("Failed to backup for re-extraction: {e}"));
+                    let _ =
+                        cliclack::log::warning(format!("Failed to backup for re-extraction: {e}"));
                     continue;
                 }
             };

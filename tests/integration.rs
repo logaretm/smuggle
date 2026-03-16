@@ -965,6 +965,213 @@ fn publish_skips_negation_patterns_in_files_field() {
     cleanup_store("@test-smug/negation");
 }
 
+// ─── Transitive dependency resolution ────────────────────────
+
+#[test]
+fn install_once_resolves_transitive_deps_not_in_consumer_package_json() {
+    // Package A depends on package B. Both are published.
+    // Consumer lists only A in package.json. B is installed as a transitive dep
+    // in node_modules but NOT in consumer's package.json.
+    // smuggle install should still find and smuggle B.
+
+    let tmp = TempDir::new().unwrap();
+
+    // Create and publish package B (the transitive dep)
+    let pkg_b_dir = tmp.path().join("pkg-b");
+    create_package(&pkg_b_dir, "smug-transitive-b", "1.0.0", &["dist"], "");
+    let dist_b = pkg_b_dir.join("dist");
+    fs::create_dir_all(&dist_b).unwrap();
+    fs::write(
+        dist_b.join("index.js"),
+        "module.exports = { b_smuggled: true };",
+    )
+    .unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&pkg_b_dir)
+        .assert()
+        .success();
+
+    // Create and publish package A, which depends on B
+    let pkg_a_dir = tmp.path().join("pkg-a");
+    create_package(
+        &pkg_a_dir,
+        "smug-transitive-a",
+        "1.0.0",
+        &["dist"],
+        r#""smug-transitive-b": "^1.0.0""#,
+    );
+    let dist_a = pkg_a_dir.join("dist");
+    fs::create_dir_all(&dist_a).unwrap();
+    fs::write(
+        dist_a.join("index.js"),
+        "module.exports = { a_smuggled: true };",
+    )
+    .unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&pkg_a_dir)
+        .assert()
+        .success();
+
+    // Create consumer that only depends on A (not B)
+    let consumer_dir = tmp.path().join("app");
+    create_consumer(&consumer_dir, &[("smug-transitive-a", "^1.0.0")]);
+
+    // Manually create node_modules with both A and B installed
+    // B is a transitive dep — simulate npm non-hoisted by placing it nested
+    let nm = consumer_dir.join("node_modules");
+    let nm_a = nm.join("smug-transitive-a");
+    fs::create_dir_all(nm_a.join("dist")).unwrap();
+    fs::write(
+        nm_a.join("package.json"),
+        r#"{"name":"smug-transitive-a","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(nm_a.join("dist/index.js"), "original A").unwrap();
+
+    // B is nested inside A's node_modules (npm non-hoisted layout)
+    let nm_b_nested = nm_a.join("node_modules").join("smug-transitive-b");
+    fs::create_dir_all(nm_b_nested.join("dist")).unwrap();
+    fs::write(
+        nm_b_nested.join("package.json"),
+        r#"{"name":"smug-transitive-b","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(nm_b_nested.join("dist/index.js"), "original B").unwrap();
+
+    // Run smuggle install --once --all
+    smuggle()
+        .args(["install", "--all", "--once", "--path"])
+        .arg(&consumer_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("transitive dep"));
+
+    // Verify A was smuggled
+    let a_content = fs::read_to_string(nm_a.join("dist/index.js")).unwrap();
+    assert_eq!(
+        a_content, "module.exports = { a_smuggled: true };",
+        "package A should be smuggled"
+    );
+
+    // Verify B (nested transitive dep) was also smuggled
+    let b_content = fs::read_to_string(nm_b_nested.join("dist/index.js")).unwrap();
+    assert_eq!(
+        b_content, "module.exports = { b_smuggled: true };",
+        "transitive dep B should be smuggled even though it's not in consumer's package.json"
+    );
+
+    cleanup_store("smug-transitive-a");
+    cleanup_store("smug-transitive-b");
+}
+
+#[test]
+fn install_once_resolves_pnpm_virtual_store_deps() {
+    // Simulate pnpm layout where a transitive dep only exists in .pnpm/ virtual store
+
+    let tmp = TempDir::new().unwrap();
+
+    // Create and publish package B
+    let pkg_b_dir = tmp.path().join("pkg-b");
+    create_package(&pkg_b_dir, "smug-pnpm-b", "2.0.0", &["dist"], "");
+    let dist_b = pkg_b_dir.join("dist");
+    fs::create_dir_all(&dist_b).unwrap();
+    fs::write(
+        dist_b.join("index.js"),
+        "module.exports = { pnpm_b_smuggled: true };",
+    )
+    .unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&pkg_b_dir)
+        .assert()
+        .success();
+
+    // Create and publish package A depending on B
+    let pkg_a_dir = tmp.path().join("pkg-a");
+    create_package(
+        &pkg_a_dir,
+        "smug-pnpm-a",
+        "2.0.0",
+        &["dist"],
+        r#""smug-pnpm-b": "^2.0.0""#,
+    );
+    let dist_a = pkg_a_dir.join("dist");
+    fs::create_dir_all(&dist_a).unwrap();
+    fs::write(
+        dist_a.join("index.js"),
+        "module.exports = { pnpm_a_smuggled: true };",
+    )
+    .unwrap();
+
+    smuggle()
+        .args(["publish", "--path"])
+        .arg(&pkg_a_dir)
+        .assert()
+        .success();
+
+    // Consumer only depends on A
+    let consumer_dir = tmp.path().join("app");
+    create_consumer(&consumer_dir, &[("smug-pnpm-a", "^2.0.0")]);
+
+    // Simulate pnpm node_modules layout
+    let nm = consumer_dir.join("node_modules");
+
+    // A has a direct symlink (pnpm creates these for direct deps)
+    let pnpm_a_real = nm.join(".pnpm/smug-pnpm-a@2.0.0/node_modules/smug-pnpm-a");
+    fs::create_dir_all(pnpm_a_real.join("dist")).unwrap();
+    fs::write(
+        pnpm_a_real.join("package.json"),
+        r#"{"name":"smug-pnpm-a","version":"2.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(pnpm_a_real.join("dist/index.js"), "original A").unwrap();
+
+    // Create top-level symlink for A (like pnpm does for direct deps)
+    let nm_a_link = nm.join("smug-pnpm-a");
+    fs::create_dir_all(nm_a_link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&pnpm_a_real, &nm_a_link).unwrap();
+
+    // B only exists in .pnpm virtual store (no top-level symlink — it's transitive)
+    let pnpm_b_real = nm.join(".pnpm/smug-pnpm-b@2.0.0/node_modules/smug-pnpm-b");
+    fs::create_dir_all(pnpm_b_real.join("dist")).unwrap();
+    fs::write(
+        pnpm_b_real.join("package.json"),
+        r#"{"name":"smug-pnpm-b","version":"2.0.0"}"#,
+    )
+    .unwrap();
+    fs::write(pnpm_b_real.join("dist/index.js"), "original B").unwrap();
+
+    // Run smuggle install --once --all
+    smuggle()
+        .args(["install", "--all", "--once", "--path"])
+        .arg(&consumer_dir)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("transitive dep"));
+
+    // Verify A was smuggled (via symlink → real path)
+    let a_content = fs::read_to_string(pnpm_a_real.join("dist/index.js")).unwrap();
+    assert_eq!(
+        a_content, "module.exports = { pnpm_a_smuggled: true };",
+        "package A should be smuggled"
+    );
+
+    // Verify B was found in .pnpm and smuggled
+    let b_content = fs::read_to_string(pnpm_b_real.join("dist/index.js")).unwrap();
+    assert_eq!(
+        b_content, "module.exports = { pnpm_b_smuggled: true };",
+        "transitive dep B should be smuggled from pnpm virtual store"
+    );
+
+    cleanup_store("smug-pnpm-a");
+    cleanup_store("smug-pnpm-b");
+}
+
 // ─── Tarball helpers ────────────────────────────────────────
 
 fn list_tarball_entries(tarball: &[u8]) -> Vec<String> {

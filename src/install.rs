@@ -335,21 +335,19 @@ fn resolve_targets(
     for entry in entries {
         let mut found = false;
         for nm_dir in &nm_dirs {
-            let pkg_path = nm_dir.join(&entry.name);
-            if !pkg_path.exists() {
-                continue;
-            }
-            let real_path = pkg_path
-                .canonicalize()
-                .map_err(|e| format!("failed to resolve {}: {e}", pkg_path.display()))?;
+            for pkg_path in find_package_in_node_modules(&entry.name, nm_dir) {
+                let real_path = pkg_path
+                    .canonicalize()
+                    .map_err(|e| format!("failed to resolve {}: {e}", pkg_path.display()))?;
 
-            if !targets.iter().any(|t| t.target_dir == real_path) {
-                targets.push(watch::OverrideTarget {
-                    name: entry.name.clone(),
-                    target_dir: real_path,
-                });
+                if !targets.iter().any(|t| t.target_dir == real_path) {
+                    targets.push(watch::OverrideTarget {
+                        name: entry.name.clone(),
+                        target_dir: real_path,
+                    });
+                }
+                found = true;
             }
-            found = true;
         }
         if !found {
             let _ = cliclack::log::warning(format!(
@@ -360,6 +358,80 @@ fn resolve_targets(
     }
 
     Ok(targets)
+}
+
+/// Find all locations of a package inside a node_modules directory, checking:
+/// 1. Direct: `node_modules/{name}` (works for direct deps in all package managers)
+/// 2. pnpm virtual store: `node_modules/.pnpm/{encoded}@*/node_modules/{name}`
+///    (collects all matches — multiple versions or peer-dep contexts may exist)
+/// 3. Nested: `node_modules/{parent}/node_modules/{name}` (npm non-hoisted deps)
+fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+
+    // 1. Direct lookup
+    let direct = nm_dir.join(name);
+    if direct.exists() {
+        results.push(direct);
+        return results;
+    }
+
+    // 2. pnpm virtual store — collect all matching versions/peer-dep contexts
+    let pnpm_dir = nm_dir.join(".pnpm");
+    if pnpm_dir.exists() {
+        // pnpm encodes scoped packages: @scope/name → @scope+name
+        let encoded_prefix = name.replace('/', "+");
+        if let Ok(entries) = std::fs::read_dir(&pnpm_dir) {
+            for entry in entries.flatten() {
+                let dir_name = entry.file_name();
+                let dir_name_str = dir_name.to_string_lossy();
+                if dir_name_str.starts_with(&format!("{encoded_prefix}@")) {
+                    let candidate = entry.path().join("node_modules").join(name);
+                    if candidate.exists() {
+                        results.push(candidate);
+                    }
+                }
+            }
+        }
+        if !results.is_empty() {
+            return results;
+        }
+    }
+
+    // 3. Nested node_modules (npm non-hoisted transitive deps)
+    if let Ok(entries) = std::fs::read_dir(nm_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let entry_name = entry.file_name();
+            let entry_str = entry_name.to_string_lossy();
+
+            // Skip hidden dirs (.pnpm, .cache, etc.)
+            if entry_str.starts_with('.') {
+                continue;
+            }
+
+            // Handle scoped packages: check inside @scope/ dirs
+            if entry_str.starts_with('@') && path.is_dir() {
+                if let Ok(scope_entries) = std::fs::read_dir(&path) {
+                    for scope_entry in scope_entries.flatten() {
+                        let nested = scope_entry.path().join("node_modules").join(name);
+                        if nested.exists() {
+                            results.push(nested);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if path.is_dir() {
+                let nested = path.join("node_modules").join(name);
+                if nested.exists() {
+                    results.push(nested);
+                }
+            }
+        }
+    }
+
+    results
 }
 
 /// Extract all tarballs into their targets. Returns an error on the first failure.

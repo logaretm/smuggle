@@ -335,7 +335,7 @@ fn resolve_targets(
     for entry in entries {
         let mut found = false;
         for nm_dir in &nm_dirs {
-            if let Some(pkg_path) = find_package_in_node_modules(&entry.name, nm_dir) {
+            for pkg_path in find_package_in_node_modules(&entry.name, nm_dir) {
                 let real_path = pkg_path
                     .canonicalize()
                     .map_err(|e| format!("failed to resolve {}: {e}", pkg_path.display()))?;
@@ -360,18 +360,22 @@ fn resolve_targets(
     Ok(targets)
 }
 
-/// Find a package inside a node_modules directory, checking:
+/// Find all locations of a package inside a node_modules directory, checking:
 /// 1. Direct: `node_modules/{name}` (works for direct deps in all package managers)
 /// 2. pnpm virtual store: `node_modules/.pnpm/{encoded}@*/node_modules/{name}`
+///    (collects all matches — multiple versions or peer-dep contexts may exist)
 /// 3. Nested: `node_modules/{parent}/node_modules/{name}` (npm non-hoisted deps)
-fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Option<PathBuf> {
+fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+
     // 1. Direct lookup
     let direct = nm_dir.join(name);
     if direct.exists() {
-        return Some(direct);
+        results.push(direct);
+        return results;
     }
 
-    // 2. pnpm virtual store
+    // 2. pnpm virtual store — collect all matching versions/peer-dep contexts
     let pnpm_dir = nm_dir.join(".pnpm");
     if pnpm_dir.exists() {
         // pnpm encodes scoped packages: @scope/name → @scope+name
@@ -383,10 +387,13 @@ fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Option<PathBuf> {
                 if dir_name_str.starts_with(&format!("{encoded_prefix}@")) {
                     let candidate = entry.path().join("node_modules").join(name);
                     if candidate.exists() {
-                        return Some(candidate);
+                        results.push(candidate);
                     }
                 }
             }
+        }
+        if !results.is_empty() {
+            return results;
         }
     }
 
@@ -397,7 +404,7 @@ fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Option<PathBuf> {
             let entry_name = entry.file_name();
             let entry_str = entry_name.to_string_lossy();
 
-            // Skip hidden dirs and the package itself
+            // Skip hidden dirs (.pnpm, .cache, etc.)
             if entry_str.starts_with('.') {
                 continue;
             }
@@ -408,7 +415,7 @@ fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Option<PathBuf> {
                     for scope_entry in scope_entries.flatten() {
                         let nested = scope_entry.path().join("node_modules").join(name);
                         if nested.exists() {
-                            return Some(nested);
+                            results.push(nested);
                         }
                     }
                 }
@@ -418,13 +425,13 @@ fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Option<PathBuf> {
             if path.is_dir() {
                 let nested = path.join("node_modules").join(name);
                 if nested.exists() {
-                    return Some(nested);
+                    results.push(nested);
                 }
             }
         }
     }
 
-    None
+    results
 }
 
 /// Extract all tarballs into their targets. Returns an error on the first failure.

@@ -45,6 +45,14 @@ pub fn watch_and_reinstall(
                 .watch(dir, RecursiveMode::Recursive)
                 .map_err(|e| format!("failed to watch {}: {e}", dir.display()))?;
         }
+        // Watch package root non-recursively for package.json changes
+        if !watch_dirs.contains(&entry.source_dir) {
+            watcher
+                .watch(&entry.source_dir, RecursiveMode::NonRecursive)
+                .map_err(|e| {
+                    format!("failed to watch {}: {e}", entry.source_dir.display())
+                })?;
+        }
     }
 
     // Track tarball hashes to avoid unnecessary restarts
@@ -217,7 +225,7 @@ pub fn watch_and_reinstall(
 /// Determine which directories to watch for a package.
 /// If the package.json has a `files` field, watch only those directories.
 /// Otherwise, watch the entire package root.
-fn resolve_watch_dirs(pkg_dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn resolve_watch_dirs(pkg_dir: &Path) -> Vec<PathBuf> {
     let pkg_json_path = pkg_dir.join("package.json");
     let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
         return vec![pkg_dir.to_path_buf()];
@@ -231,7 +239,6 @@ fn resolve_watch_dirs(pkg_dir: &Path) -> Vec<PathBuf> {
     };
 
     let mut dirs = Vec::new();
-    dirs.push(pkg_dir.to_path_buf());
 
     for pattern in files {
         if pattern.starts_with('!') {
@@ -265,6 +272,11 @@ fn resolve_watch_dirs(pkg_dir: &Path) -> Vec<PathBuf> {
         }
     }
 
+    // Fallback: if no directories resolved, watch the package root
+    if dirs.is_empty() {
+        return vec![pkg_dir.to_path_buf()];
+    }
+
     dirs.sort();
     dirs.dedup();
 
@@ -296,4 +308,113 @@ fn is_ignored_path(path: &Path, source_root: &Path) -> bool {
     rel_str.starts_with("node_modules")
         || rel_str.starts_with(".git")
         || rel_str.starts_with("target")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn setup_pkg(tmp: &Path, pkg_json: &str, dirs: &[&str], files: &[&str]) {
+        fs::create_dir_all(tmp).unwrap();
+        fs::write(tmp.join("package.json"), pkg_json).unwrap();
+        for d in dirs {
+            fs::create_dir_all(tmp.join(d)).unwrap();
+        }
+        for f in files {
+            let path = tmp.join(f);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, "").unwrap();
+        }
+    }
+
+    #[test]
+    fn no_files_field_watches_entire_root() {
+        let tmp = std::env::temp_dir().join("lpm_test_watch_no_files");
+        let _ = fs::remove_dir_all(&tmp);
+        setup_pkg(&tmp, r#"{"name": "pkg"}"#, &[], &[]);
+
+        let dirs = resolve_watch_dirs(&tmp);
+        assert_eq!(dirs, vec![tmp.clone()]);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn files_field_watches_only_listed_dirs() {
+        let tmp = std::env::temp_dir().join("lpm_test_watch_files_field");
+        let _ = fs::remove_dir_all(&tmp);
+        setup_pkg(
+            &tmp,
+            r#"{"name": "pkg", "files": ["dist", "lib"]}"#,
+            &["dist", "lib", "src", "tests"],
+            &[],
+        );
+
+        let dirs = resolve_watch_dirs(&tmp);
+        assert!(dirs.contains(&tmp.join("dist")));
+        assert!(dirs.contains(&tmp.join("lib")));
+        assert!(!dirs.contains(&tmp.clone()), "should not watch entire root");
+        assert!(!dirs.contains(&tmp.join("src")));
+        assert!(!dirs.contains(&tmp.join("tests")));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn subdirectory_dedup_works() {
+        let tmp = std::env::temp_dir().join("lpm_test_watch_dedup");
+        let _ = fs::remove_dir_all(&tmp);
+        setup_pkg(
+            &tmp,
+            r#"{"name": "pkg", "files": ["dist", "dist/sub"]}"#,
+            &["dist", "dist/sub"],
+            &[],
+        );
+
+        let dirs = resolve_watch_dirs(&tmp);
+        // dist/sub is a subdirectory of dist, so only dist should be watched
+        assert!(dirs.contains(&tmp.join("dist")));
+        assert!(!dirs.contains(&tmp.join("dist/sub")));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn wildcard_pattern_resolves_to_root() {
+        let tmp = std::env::temp_dir().join("lpm_test_watch_wildcard");
+        let _ = fs::remove_dir_all(&tmp);
+        setup_pkg(
+            &tmp,
+            r#"{"name": "pkg", "files": ["*.js"]}"#,
+            &[],
+            &["index.js"],
+        );
+
+        let dirs = resolve_watch_dirs(&tmp);
+        // *.js has empty base, so it should resolve to pkg_dir
+        assert!(dirs.contains(&tmp.clone()));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn fallback_when_no_patterns_resolve() {
+        let tmp = std::env::temp_dir().join("lpm_test_watch_fallback");
+        let _ = fs::remove_dir_all(&tmp);
+        setup_pkg(
+            &tmp,
+            r#"{"name": "pkg", "files": ["nonexistent"]}"#,
+            &[],
+            &[],
+        );
+
+        let dirs = resolve_watch_dirs(&tmp);
+        // No patterns matched anything, should fallback to package root
+        assert_eq!(dirs, vec![tmp.clone()]);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

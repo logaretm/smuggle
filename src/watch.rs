@@ -49,9 +49,7 @@ pub fn watch_and_reinstall(
         if !watch_dirs.contains(&entry.source_dir) {
             watcher
                 .watch(&entry.source_dir, RecursiveMode::NonRecursive)
-                .map_err(|e| {
-                    format!("failed to watch {}: {e}", entry.source_dir.display())
-                })?;
+                .map_err(|e| format!("failed to watch {}: {e}", entry.source_dir.display()))?;
         }
     }
 

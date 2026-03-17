@@ -10,8 +10,24 @@ Smuggle takes a different approach: it packs your local package the same way `np
 
 ## Install
 
+### Homebrew
+
+```sh
+brew install logaretm/tap/smuggle
+```
+
+### Cargo
+
 ```sh
 cargo install smuggle
+```
+
+### From source
+
+```sh
+git clone https://github.com/logaretm/smuggle.git
+cd smuggle
+cargo install --path .
 ```
 
 ## Usage

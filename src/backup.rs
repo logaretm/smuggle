@@ -96,3 +96,23 @@ pub fn setup_ctrlc_restore(backup_base: PathBuf, targets: Vec<(PathBuf, PathBuf)
         std::process::exit(0);
     });
 }
+
+/// Set up a ctrl-c handler for "added" packages: remove injected dirs and restore package.json.
+pub fn setup_ctrlc_add_cleanup(
+    added_dirs: Vec<PathBuf>,
+    pkg_json_path: PathBuf,
+    original_pkg_json: String,
+) {
+    let _ = ctrlc::set_handler(move || {
+        for dir in &added_dirs {
+            let _ = std::fs::remove_dir_all(dir);
+            // Clean up empty scope directory (e.g. node_modules/@scope/)
+            if let Some(parent) = dir.parent() {
+                let _ = std::fs::remove_dir(parent); // only succeeds if empty
+            }
+        }
+        let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
+        eprintln!("\n  Reverted package.json and removed added packages");
+        std::process::exit(0);
+    });
+}

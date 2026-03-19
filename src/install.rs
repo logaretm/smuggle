@@ -3,6 +3,135 @@ use std::path::{Path, PathBuf};
 
 use crate::{backup, pack, pm, store, watch, workspace};
 
+pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result<(), String> {
+    let consumer_dir = consumer_dir
+        .canonicalize()
+        .map_err(|e| format!("invalid path: {e}"))?;
+
+    let pkg_json_path = consumer_dir.join("package.json");
+    if !pkg_json_path.exists() {
+        return Err("no package.json found in consumer directory".into());
+    }
+
+    let _ = cliclack::intro(style(" smuggle add ").on_cyan().black());
+
+    // Look up the package in the store
+    let registered = store::list();
+    let entry = registered.iter().find(|e| e.name == name).ok_or_else(|| {
+        format!(
+            "{} is not registered. Run {} in the package directory first.",
+            style(name).cyan(),
+            style("smuggle publish").cyan(),
+        )
+    })?;
+
+    // Check if the package is already in dependencies
+    let consumer_pkg: pack::ConsumerPackageJson =
+        serde_json::from_str(&std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("failed to parse consumer package.json: {e}"))?;
+
+    if consumer_pkg.all_dependency_names().contains(&entry.name) {
+        return Err(format!(
+            "{} is already in your dependencies. Use {} instead.",
+            style(name).cyan(),
+            style("smuggle install").cyan(),
+        ));
+    }
+
+    // Add to package.json
+    let dep_key = if dev {
+        "devDependencies"
+    } else {
+        "dependencies"
+    };
+    let version_spec = format!("^{}", entry.version);
+
+    let original_pkg_json = std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?;
+    let mut pkg_value: serde_json::Value =
+        serde_json::from_str(&original_pkg_json).map_err(|e| e.to_string())?;
+
+    if pkg_value.get(dep_key).is_none() {
+        pkg_value[dep_key] = serde_json::json!({});
+    }
+    pkg_value[dep_key][name] = serde_json::Value::String(version_spec.clone());
+
+    let new_pkg_json = serde_json::to_string_pretty(&pkg_value).map_err(|e| e.to_string())?;
+    std::fs::write(&pkg_json_path, format!("{new_pkg_json}\n")).map_err(|e| e.to_string())?;
+
+    cliclack::log::info(format!(
+        "Added {} to {} as {}",
+        style(name).cyan(),
+        style(dep_key).dim(),
+        style(&version_spec).dim(),
+    ))
+    .map_err(|e| e.to_string())?;
+
+    // Ensure node_modules exists
+    let nm_dir = consumer_dir.join("node_modules");
+    std::fs::create_dir_all(&nm_dir).map_err(|e| format!("failed to create node_modules: {e}"))?;
+
+    // Create target directory and extract tarball
+    let target_dir = nm_dir.join(name);
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("failed to create {}: {e}", target_dir.display()))?;
+
+    let extract_spinner = cliclack::spinner();
+    extract_spinner.start(format!("Smuggling {}...", style(name).cyan()));
+
+    let tarball = store::load_tarball(name)?;
+    pack::extract_tarball_to(&tarball, &target_dir)?;
+
+    extract_spinner.stop(format!(
+        "Smuggled {} into node_modules",
+        style(name).green()
+    ));
+
+    if once {
+        let _ = cliclack::outro("Done (package.json was modified — remember to revert if needed)");
+        return Ok(());
+    }
+
+    // Set up cleanup on ctrl-c
+    let added_dirs = vec![target_dir.clone()];
+    backup::setup_ctrlc_add_cleanup(added_dirs, pkg_json_path.clone(), original_pkg_json.clone());
+
+    // Clear bundler caches
+    pm::clear_bundler_caches(&consumer_dir, &[]);
+    pm::touch_vite_configs(&consumer_dir, &[]);
+
+    cliclack::log::success(format!(
+        "Watching for changes... {}",
+        style("(ctrl-c to stop and revert)").dim()
+    ))
+    .map_err(|e| e.to_string())?;
+
+    // Watch for changes
+    let targets = vec![watch::OverrideTarget {
+        name: entry.name.clone(),
+        target_dir,
+    }];
+    let entry_refs: Vec<&store::StoreEntry> = vec![entry];
+    watch::watch_and_reinstall(&entry_refs, &targets, &consumer_dir, &[])?;
+
+    // Cleanup on normal exit
+    let restore_spinner = cliclack::spinner();
+    restore_spinner.start("Reverting package.json and removing added packages...");
+
+    for target in &targets {
+        let _ = std::fs::remove_dir_all(&target.target_dir);
+        if let Some(parent) = target.target_dir.parent() {
+            let _ = std::fs::remove_dir(parent); // only removes if empty (scoped packages)
+        }
+    }
+    std::fs::write(&pkg_json_path, &original_pkg_json).map_err(|e| e.to_string())?;
+
+    restore_spinner.stop("Reverted package.json and removed added packages");
+
+    let _ = cliclack::outro("Done");
+
+    Ok(())
+}
+
 pub fn cmd_install(consumer_dir: &Path, select_all: bool, once: bool) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()

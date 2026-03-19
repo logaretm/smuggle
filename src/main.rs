@@ -71,6 +71,24 @@ enum Commands {
         #[arg(long)]
         once: bool,
     },
+
+    /// Add a registered package that isn't yet in your dependencies
+    Add {
+        /// Package name (must be registered via `smuggle publish`)
+        name: String,
+
+        /// Add as a devDependency instead of a dependency
+        #[arg(long)]
+        dev: bool,
+
+        /// Path to the consumer project (defaults to current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+
+        /// Swap packages once and exit without watching for changes
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 fn main() {
@@ -100,6 +118,21 @@ fn main() {
             let all = all || cli.all;
             let once = once || cli.once;
             if let Err(e) = install::cmd_install(&consumer_dir, all, once) {
+                let _ = cliclack::outro(format!("{}", style(e).red()));
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Add {
+            name,
+            dev,
+            path,
+            once,
+        }) => {
+            let consumer_dir = path
+                .or(cli.path)
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            let once = once || cli.once;
+            if let Err(e) = install::cmd_add(&consumer_dir, &name, dev, once) {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }

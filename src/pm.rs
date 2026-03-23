@@ -72,6 +72,36 @@ pub fn clear_bundler_caches(root: &Path, extra_dirs: &[&Path]) {
     }
 }
 
+/// Detect which package manager is used in the given directory.
+/// Checks for lockfiles in order: pnpm, yarn, bun, npm (fallback).
+pub fn detect_package_manager(dir: &Path) -> &'static str {
+    if dir.join("pnpm-lock.yaml").exists() {
+        "pnpm"
+    } else if dir.join("yarn.lock").exists() {
+        "yarn"
+    } else if dir.join("bun.lockb").exists() || dir.join("bun.lock").exists() {
+        "bun"
+    } else {
+        "npm"
+    }
+}
+
+/// Check if a package.json in the given directory has a specific script.
+pub fn has_script(dir: &Path, script: &str) -> bool {
+    let pkg_json_path = dir.join("package.json");
+    let Ok(raw) = std::fs::read_to_string(pkg_json_path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    value
+        .get("scripts")
+        .and_then(|s| s.get(script))
+        .and_then(|v| v.as_str())
+        .is_some()
+}
+
 /// Touch the vite config file (if any) to trigger a dev server restart.
 /// Checks root and all workspace member directories.
 pub fn touch_vite_configs(root: &Path, workspace_pkg_dirs: &[PathBuf]) {

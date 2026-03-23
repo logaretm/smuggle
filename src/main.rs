@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_if)]
 
 mod backup;
+mod dev;
 mod install;
 mod pack;
 mod pm;
@@ -89,6 +90,25 @@ enum Commands {
         #[arg(long)]
         once: bool,
     },
+
+    /// Swap local packages and run your dev server
+    Dev {
+        /// Path to the consumer project (defaults to current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+
+        /// Select all matching packages without prompting
+        #[arg(long)]
+        all: bool,
+
+        /// Kill and restart the dev server on each package change (instead of relying on HMR)
+        #[arg(long)]
+        restart: bool,
+
+        /// Dev server command (auto-detected from package.json "dev" script if omitted)
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
 }
 
 fn main() {
@@ -118,6 +138,21 @@ fn main() {
             let all = all || cli.all;
             let once = once || cli.once;
             if let Err(e) = install::cmd_install(&consumer_dir, all, once) {
+                let _ = cliclack::outro(format!("{}", style(e).red()));
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Dev {
+            path,
+            all,
+            restart,
+            command,
+        }) => {
+            let consumer_dir = path
+                .or(cli.path)
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            let all = all || cli.all;
+            if let Err(e) = dev::cmd_dev(&consumer_dir, all, restart, &command) {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }

@@ -1,9 +1,15 @@
 use console::style;
 use std::path::Path;
+use std::time::Instant;
 
 use crate::{ci, pack, store, workspace};
 
-pub fn cmd_publish(pkg_dir: &Path, select_all: bool, json: bool) -> Result<(), String> {
+pub fn cmd_publish(
+    pkg_dir: &Path,
+    select_all: bool,
+    json: bool,
+    summary: &mut ci::SummaryCollector,
+) -> Result<(), String> {
     let pkg_dir = pkg_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
@@ -13,14 +19,18 @@ pub fn cmd_publish(pkg_dir: &Path, select_all: bool, json: bool) -> Result<(), S
 
     // Check for workspace (pnpm or yarn)
     if let Some(ws) = workspace::detect_workspace(&pkg_dir) {
-        return cmd_publish_workspace(&pkg_dir, ws, select_all, json);
+        return cmd_publish_workspace(&pkg_dir, ws, select_all, json, summary);
     }
 
     // Single package publish
-    publish_single_package(&pkg_dir, json)
+    publish_single_package(&pkg_dir, json, summary)
 }
 
-fn publish_single_package(pkg_dir: &Path, json: bool) -> Result<(), String> {
+fn publish_single_package(
+    pkg_dir: &Path,
+    json: bool,
+    summary: &mut ci::SummaryCollector,
+) -> Result<(), String> {
     let pkg_json_path = pkg_dir.join("package.json");
     if !pkg_json_path.exists() {
         return Err("no package.json found in this directory".into());
@@ -40,15 +50,20 @@ fn publish_single_package(pkg_dir: &Path, json: bool) -> Result<(), String> {
         .as_ref()
         .ok_or("package.json missing 'version' field")?;
 
+    let start = Instant::now();
+
     if json {
         let tarball = pack::pack(pkg_dir, &pkg_json)?;
         store::save(name, version, pkg_dir, &tarball, &pkg_json.dependencies())?;
+        let ms = ci::elapsed_ms(start);
         ci::emit(&ci::Event::Publish {
             package: name,
             version,
             status: ci::Status::Ok,
             error: None,
+            duration_ms: Some(ms),
         });
+        summary.push("publish", name, version, "ok", ms);
     } else {
         let spinner = cliclack::spinner();
         spinner.start(format!("Packing {name}@{version}..."));
@@ -70,6 +85,7 @@ fn cmd_publish_workspace(
     ws: workspace::DetectedWorkspace,
     select_all: bool,
     json: bool,
+    summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     if !json {
         let _ = cliclack::intro(style(" smuggle publish ").on_cyan().black());
@@ -123,7 +139,7 @@ fn cmd_publish_workspace(
 
     for &idx in &selected_indices {
         let pkg = &packages[idx];
-        match publish_single_package(&pkg.path, json) {
+        match publish_single_package(&pkg.path, json, summary) {
             Ok(()) => published += 1,
             Err(e) => {
                 if json {
@@ -132,7 +148,9 @@ fn cmd_publish_workspace(
                         version: &pkg.version,
                         status: ci::Status::Error,
                         error: Some(&e),
+                        duration_ms: None,
                     });
+                    summary.push("publish", &pkg.name, &pkg.version, "error", 0);
                 } else {
                     cliclack::log::warning(format!("Failed to publish {}: {e}", pkg.name))
                         .map_err(|e| e.to_string())?;
@@ -147,6 +165,7 @@ fn cmd_publish_workspace(
             published,
             installed: 0,
             failed: errors.len(),
+            duration_ms: Some(ci::elapsed_ms(summary.start)),
         });
     } else if errors.is_empty() {
         let _ = cliclack::outro(format!(

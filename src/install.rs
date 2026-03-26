@@ -1,5 +1,6 @@
 use console::style;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::{backup, ci, pack, pm, store, watch, workspace};
 
@@ -144,14 +145,18 @@ pub fn cmd_install(
     select_all: bool,
     once: bool,
     json: bool,
+    summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
+    // In CI, always select all packages
+    let select_all = select_all || ci::is_ci();
+
     // Detect workspace (pnpm or yarn)
     if let Some(ws) = workspace::detect_workspace(&consumer_dir) {
-        return cmd_install_workspace(&consumer_dir, ws, select_all, once, json);
+        return cmd_install_workspace(&consumer_dir, ws, select_all, once, json, summary);
     }
 
     let pkg_json_path = consumer_dir.join("package.json");
@@ -231,7 +236,7 @@ pub fn cmd_install(
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(&consumer_dir, &selected, &[], once, json)
+    run_install_flow(&consumer_dir, &selected, &[], once, json, summary)
 }
 
 fn cmd_install_workspace(
@@ -240,6 +245,7 @@ fn cmd_install_workspace(
     select_all: bool,
     once: bool,
     json: bool,
+    summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     if !json {
         let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
@@ -342,7 +348,7 @@ fn cmd_install_workspace(
         .iter()
         .map(|wp| wp.path.clone())
         .collect();
-    run_install_flow(root, &selected, &ws_dirs, once, json)
+    run_install_flow(root, &selected, &ws_dirs, once, json, summary)
 }
 
 /// Shared install flow: expand deps, overwrite in node_modules, watch for changes.
@@ -353,6 +359,7 @@ fn run_install_flow(
     workspace_pkg_dirs: &[PathBuf],
     once: bool,
     json: bool,
+    summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     // Expand: include registered transitive dependencies
     let registered = store::list();
@@ -378,7 +385,7 @@ fn run_install_flow(
     }
 
     // Resolve each package's location in node_modules
-    let targets = resolve_targets(&all_refs, install_dir, workspace_pkg_dirs, json)?;
+    let targets = resolve_targets(&all_refs, install_dir, workspace_pkg_dirs, json, summary)?;
 
     if targets.is_empty() {
         return Err("none of the selected packages are installed in node_modules".into());
@@ -386,30 +393,44 @@ fn run_install_flow(
 
     if once {
         if json {
-            // JSON one-shot mode: emit per-package events
+            // JSON one-shot mode: emit per-package events with timing
             let mut installed = 0;
             let mut failed = 0;
             for target in &targets {
+                let start = Instant::now();
+                // Look up version for summary
+                let version = all_entries
+                    .iter()
+                    .find(|e| e.name == target.name)
+                    .map(|e| e.version.as_str())
+                    .unwrap_or("?");
+
                 match store::load_tarball(&target.name)
                     .and_then(|t| pack::extract_tarball_to(&t, &target.target_dir))
                 {
                     Ok(()) => {
+                        let ms = ci::elapsed_ms(start);
                         let loc = target.target_dir.display().to_string();
                         ci::emit(&ci::Event::Install {
                             package: &target.name,
                             location: Some(&loc),
                             status: ci::Status::Ok,
                             error: None,
+                            duration_ms: Some(ms),
                         });
+                        summary.push("install", &target.name, version, "ok", ms);
                         installed += 1;
                     }
                     Err(e) => {
+                        let ms = ci::elapsed_ms(start);
                         ci::emit(&ci::Event::Install {
                             package: &target.name,
                             location: None,
                             status: ci::Status::Error,
                             error: Some(&e),
+                            duration_ms: Some(ms),
                         });
+                        summary.push("install", &target.name, version, "error", ms);
                         failed += 1;
                     }
                 }
@@ -418,6 +439,7 @@ fn run_install_flow(
                 published: 0,
                 installed,
                 failed,
+                duration_ms: Some(ci::elapsed_ms(summary.start)),
             });
             if failed > 0 {
                 return Err(format!("{failed} package(s) failed to install"));
@@ -520,6 +542,7 @@ pub fn resolve_targets(
     install_dir: &Path,
     workspace_pkg_dirs: &[PathBuf],
     json: bool,
+    summary: &mut ci::SummaryCollector,
 ) -> Result<Vec<watch::OverrideTarget>, String> {
     let mut nm_dirs: Vec<PathBuf> = vec![install_dir.join("node_modules")];
     for ws_dir in workspace_pkg_dirs {
@@ -558,7 +581,9 @@ pub fn resolve_targets(
                     location: None,
                     status: ci::Status::Skipped,
                     error: Some("not found in node_modules"),
+                    duration_ms: None,
                 });
+                summary.push("install", &entry.name, &entry.version, "skipped", 0);
             } else {
                 let _ = cliclack::log::warning(format!(
                     "{} not found in node_modules — skipping",

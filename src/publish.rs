@@ -1,23 +1,26 @@
 use console::style;
 use std::path::Path;
 
-use crate::{pack, store, workspace};
+use crate::{ci, pack, store, workspace};
 
-pub fn cmd_publish(pkg_dir: &Path, select_all: bool) -> Result<(), String> {
+pub fn cmd_publish(pkg_dir: &Path, select_all: bool, json: bool) -> Result<(), String> {
     let pkg_dir = pkg_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
+    // In CI, always select all packages in a workspace
+    let select_all = select_all || ci::is_ci();
+
     // Check for workspace (pnpm or yarn)
     if let Some(ws) = workspace::detect_workspace(&pkg_dir) {
-        return cmd_publish_workspace(&pkg_dir, ws, select_all);
+        return cmd_publish_workspace(&pkg_dir, ws, select_all, json);
     }
 
     // Single package publish
-    publish_single_package(&pkg_dir)
+    publish_single_package(&pkg_dir, json)
 }
 
-fn publish_single_package(pkg_dir: &Path) -> Result<(), String> {
+fn publish_single_package(pkg_dir: &Path, json: bool) -> Result<(), String> {
     let pkg_json_path = pkg_dir.join("package.json");
     if !pkg_json_path.exists() {
         return Err("no package.json found in this directory".into());
@@ -37,17 +40,27 @@ fn publish_single_package(pkg_dir: &Path) -> Result<(), String> {
         .as_ref()
         .ok_or("package.json missing 'version' field")?;
 
-    let spinner = cliclack::spinner();
-    spinner.start(format!("Packing {name}@{version}..."));
+    if json {
+        let tarball = pack::pack(pkg_dir, &pkg_json)?;
+        store::save(name, version, pkg_dir, &tarball, &pkg_json.dependencies())?;
+        ci::emit(&ci::Event::Publish {
+            package: name,
+            version,
+            status: ci::Status::Ok,
+            error: None,
+        });
+    } else {
+        let spinner = cliclack::spinner();
+        spinner.start(format!("Packing {name}@{version}..."));
 
-    let tarball = pack::pack(pkg_dir, &pkg_json)?;
+        let tarball = pack::pack(pkg_dir, &pkg_json)?;
+        store::save(name, version, pkg_dir, &tarball, &pkg_json.dependencies())?;
 
-    store::save(name, version, pkg_dir, &tarball, &pkg_json.dependencies())?;
-
-    spinner.stop(format!(
-        "Published {} -> ~/.smuggle/packages/{name}/",
-        style(format!("{name}@{version}")).cyan(),
-    ));
+        spinner.stop(format!(
+            "Published {} -> ~/.smuggle/packages/{name}/",
+            style(format!("{name}@{version}")).cyan(),
+        ));
+    }
 
     Ok(())
 }
@@ -56,10 +69,13 @@ fn cmd_publish_workspace(
     _root: &Path,
     ws: workspace::DetectedWorkspace,
     select_all: bool,
+    json: bool,
 ) -> Result<(), String> {
-    let _ = cliclack::intro(style(" smuggle publish ").on_cyan().black());
-
-    cliclack::log::info(format!("Detected {} workspace", ws.kind)).map_err(|e| e.to_string())?;
+    if !json {
+        let _ = cliclack::intro(style(" smuggle publish ").on_cyan().black());
+        cliclack::log::info(format!("Detected {} workspace", ws.kind))
+            .map_err(|e| e.to_string())?;
+    }
 
     // Filter out the root package and private packages — they're never publishable
     let packages: Vec<workspace::WorkspacePackage> = ws
@@ -72,30 +88,32 @@ fn cmd_publish_workspace(
         return Err("no publishable packages found in workspace".into());
     }
 
-    let initial: Vec<usize> = if select_all {
+    let selected_indices: Vec<usize> = if select_all {
         (0..packages.len()).collect()
     } else {
-        vec![]
+        let initial: Vec<usize> = vec![];
+
+        let mut prompt = cliclack::multiselect(format!(
+            "Select packages to publish {}",
+            style("(space to toggle, enter to confirm)").dim()
+        ));
+
+        for (i, p) in packages.iter().enumerate() {
+            let label = format!("{} @ {}", p.name, p.version);
+            prompt = prompt.item(i, label, "");
+        }
+
+        prompt = prompt.initial_values(initial);
+
+        prompt
+            .interact()
+            .map_err(|e| format!("selection cancelled: {e}"))?
     };
 
-    let mut prompt = cliclack::multiselect(format!(
-        "Select packages to publish {}",
-        style("(space to toggle, enter to confirm)").dim()
-    ));
-
-    for (i, p) in packages.iter().enumerate() {
-        let label = format!("{} @ {}", p.name, p.version);
-        prompt = prompt.item(i, label, "");
-    }
-
-    prompt = prompt.initial_values(initial);
-
-    let selected_indices: Vec<usize> = prompt
-        .interact()
-        .map_err(|e| format!("selection cancelled: {e}"))?;
-
     if selected_indices.is_empty() {
-        let _ = cliclack::outro("No packages selected, nothing to do.");
+        if !json {
+            let _ = cliclack::outro("No packages selected, nothing to do.");
+        }
         return Ok(());
     }
 
@@ -105,17 +123,32 @@ fn cmd_publish_workspace(
 
     for &idx in &selected_indices {
         let pkg = &packages[idx];
-        match publish_single_package(&pkg.path) {
+        match publish_single_package(&pkg.path, json) {
             Ok(()) => published += 1,
             Err(e) => {
-                cliclack::log::warning(format!("Failed to publish {}: {e}", pkg.name))
-                    .map_err(|e| e.to_string())?;
+                if json {
+                    ci::emit(&ci::Event::Publish {
+                        package: &pkg.name,
+                        version: &pkg.version,
+                        status: ci::Status::Error,
+                        error: Some(&e),
+                    });
+                } else {
+                    cliclack::log::warning(format!("Failed to publish {}: {e}", pkg.name))
+                        .map_err(|e| e.to_string())?;
+                }
                 errors.push(pkg.name.clone());
             }
         }
     }
 
-    if errors.is_empty() {
+    if json {
+        ci::emit(&ci::Event::Summary {
+            published,
+            installed: 0,
+            failed: errors.len(),
+        });
+    } else if errors.is_empty() {
         let _ = cliclack::outro(format!(
             "Published {} package(s)",
             style(published).green().bold()
@@ -126,6 +159,10 @@ fn cmd_publish_workspace(
             style(published).green().bold(),
             style(errors.len()).red().bold(),
         ));
+    }
+
+    if !errors.is_empty() {
+        return Err(format!("failed to publish: {}", errors.join(", ")));
     }
 
     Ok(())

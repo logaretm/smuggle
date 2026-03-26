@@ -1,7 +1,7 @@
 use console::style;
 use std::path::{Path, PathBuf};
 
-use crate::{backup, pack, pm, store, watch, workspace};
+use crate::{backup, ci, pack, pm, store, watch, workspace};
 
 pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result<(), String> {
     let consumer_dir = consumer_dir
@@ -139,14 +139,19 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
     Ok(())
 }
 
-pub fn cmd_install(consumer_dir: &Path, select_all: bool, once: bool) -> Result<(), String> {
+pub fn cmd_install(
+    consumer_dir: &Path,
+    select_all: bool,
+    once: bool,
+    json: bool,
+) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
     // Detect workspace (pnpm or yarn)
     if let Some(ws) = workspace::detect_workspace(&consumer_dir) {
-        return cmd_install_workspace(&consumer_dir, ws, select_all, once);
+        return cmd_install_workspace(&consumer_dir, ws, select_all, once, json);
     }
 
     let pkg_json_path = consumer_dir.join("package.json");
@@ -154,7 +159,9 @@ pub fn cmd_install(consumer_dir: &Path, select_all: bool, once: bool) -> Result<
         return Err("no package.json found in consumer directory".into());
     }
 
-    let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
+    if !json {
+        let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
+    }
 
     let consumer_pkg: pack::ConsumerPackageJson =
         serde_json::from_str(&std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?)
@@ -178,23 +185,25 @@ pub fn cmd_install(consumer_dir: &Path, select_all: bool, once: bool) -> Result<
     matches.sort_by(|a, b| a.name.cmp(&b.name));
 
     let selected: Vec<&store::StoreEntry> = if select_all {
-        let list: Vec<String> = matches
-            .iter()
-            .map(|e| {
-                format!(
-                    "{} @ {} ({})",
-                    style(&e.name).cyan(),
-                    e.version,
-                    e.source_dir.display()
-                )
-            })
-            .collect();
-        cliclack::log::info(format!(
-            "Selecting all {} matching package(s)\n{}",
-            matches.len(),
-            list.join("\n"),
-        ))
-        .map_err(|e| e.to_string())?;
+        if !json {
+            let list: Vec<String> = matches
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{} @ {} ({})",
+                        style(&e.name).cyan(),
+                        e.version,
+                        e.source_dir.display()
+                    )
+                })
+                .collect();
+            cliclack::log::info(format!(
+                "Selecting all {} matching package(s)\n{}",
+                matches.len(),
+                list.join("\n"),
+            ))
+            .map_err(|e| e.to_string())?;
+        }
         matches.clone()
     } else {
         let mut prompt = cliclack::multiselect("Select packages to proxy locally");
@@ -213,14 +222,16 @@ pub fn cmd_install(consumer_dir: &Path, select_all: bool, once: bool) -> Result<
             .map_err(|e| format!("selection cancelled: {e}"))?;
 
         if selections.is_empty() {
-            let _ = cliclack::outro("No packages selected, nothing to do.");
+            if !json {
+                let _ = cliclack::outro("No packages selected, nothing to do.");
+            }
             return Ok(());
         }
 
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(&consumer_dir, &selected, &[], once)
+    run_install_flow(&consumer_dir, &selected, &[], once, json)
 }
 
 fn cmd_install_workspace(
@@ -228,10 +239,13 @@ fn cmd_install_workspace(
     ws: workspace::DetectedWorkspace,
     select_all: bool,
     once: bool,
+    json: bool,
 ) -> Result<(), String> {
-    let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
-
-    cliclack::log::info(format!("Detected {} workspace", ws.kind)).map_err(|e| e.to_string())?;
+    if !json {
+        let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
+        cliclack::log::info(format!("Detected {} workspace", ws.kind))
+            .map_err(|e| e.to_string())?;
+    }
 
     let workspace_packages = ws.packages;
 
@@ -281,20 +295,22 @@ fn cmd_install_workspace(
 
     // Show which workspace packages use which proxied deps
     let selected: Vec<&store::StoreEntry> = if select_all {
-        let mut lines = Vec::new();
-        for (wp_name, dep_names) in &workspace_dep_map {
-            lines.push(format!("{}:", style(wp_name).bold()));
-            for dep in dep_names {
-                lines.push(format!("  {}", style(dep).cyan()));
+        if !json {
+            let mut lines = Vec::new();
+            for (wp_name, dep_names) in &workspace_dep_map {
+                lines.push(format!("{}:", style(wp_name).bold()));
+                for dep in dep_names {
+                    lines.push(format!("  {}", style(dep).cyan()));
+                }
             }
+            cliclack::log::info(format!(
+                "Found {} proxied package(s) across {} workspace package(s)\n{}",
+                matches.len(),
+                workspace_dep_map.len(),
+                lines.join("\n"),
+            ))
+            .map_err(|e| e.to_string())?;
         }
-        cliclack::log::info(format!(
-            "Found {} proxied package(s) across {} workspace package(s)\n{}",
-            matches.len(),
-            workspace_dep_map.len(),
-            lines.join("\n"),
-        ))
-        .map_err(|e| e.to_string())?;
         matches.clone()
     } else {
         let mut prompt = cliclack::multiselect("Select packages to proxy locally");
@@ -313,7 +329,9 @@ fn cmd_install_workspace(
             .map_err(|e| format!("selection cancelled: {e}"))?;
 
         if selections.is_empty() {
-            let _ = cliclack::outro("No packages selected, nothing to do.");
+            if !json {
+                let _ = cliclack::outro("No packages selected, nothing to do.");
+            }
             return Ok(());
         }
 
@@ -324,7 +342,7 @@ fn cmd_install_workspace(
         .iter()
         .map(|wp| wp.path.clone())
         .collect();
-    run_install_flow(root, &selected, &ws_dirs, once)
+    run_install_flow(root, &selected, &ws_dirs, once, json)
 }
 
 /// Shared install flow: expand deps, overwrite in node_modules, watch for changes.
@@ -334,13 +352,14 @@ fn run_install_flow(
     selected: &[&store::StoreEntry],
     workspace_pkg_dirs: &[PathBuf],
     once: bool,
+    json: bool,
 ) -> Result<(), String> {
     // Expand: include registered transitive dependencies
     let registered = store::list();
     let all_entries = expand_with_registered_deps(selected, &registered);
     let all_refs: Vec<&store::StoreEntry> = all_entries.iter().collect();
 
-    if all_refs.len() > selected.len() {
+    if all_refs.len() > selected.len() && !json {
         let extra: Vec<&str> = all_refs
             .iter()
             .filter(|e| !selected.iter().any(|s| s.name == e.name))
@@ -359,28 +378,67 @@ fn run_install_flow(
     }
 
     // Resolve each package's location in node_modules
-    let targets = resolve_targets(&all_refs, install_dir, workspace_pkg_dirs)?;
+    let targets = resolve_targets(&all_refs, install_dir, workspace_pkg_dirs, json)?;
 
     if targets.is_empty() {
         return Err("none of the selected packages are installed in node_modules".into());
     }
 
     if once {
-        // One-shot mode: swap and exit, no backup/restore, no cache clearing, no watch
-        let extract_spinner = cliclack::spinner();
-        extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
+        if json {
+            // JSON one-shot mode: emit per-package events
+            let mut installed = 0;
+            let mut failed = 0;
+            for target in &targets {
+                match store::load_tarball(&target.name)
+                    .and_then(|t| pack::extract_tarball_to(&t, &target.target_dir))
+                {
+                    Ok(()) => {
+                        let loc = target.target_dir.display().to_string();
+                        ci::emit(&ci::Event::Install {
+                            package: &target.name,
+                            location: Some(&loc),
+                            status: ci::Status::Ok,
+                            error: None,
+                        });
+                        installed += 1;
+                    }
+                    Err(e) => {
+                        ci::emit(&ci::Event::Install {
+                            package: &target.name,
+                            location: None,
+                            status: ci::Status::Error,
+                            error: Some(&e),
+                        });
+                        failed += 1;
+                    }
+                }
+            }
+            ci::emit(&ci::Event::Summary {
+                published: 0,
+                installed,
+                failed,
+            });
+            if failed > 0 {
+                return Err(format!("{failed} package(s) failed to install"));
+            }
+        } else {
+            // One-shot mode: swap and exit, no backup/restore, no cache clearing, no watch
+            let extract_spinner = cliclack::spinner();
+            extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
 
-        for target in &targets {
-            let tarball = store::load_tarball(&target.name)?;
-            pack::extract_tarball_to(&tarball, &target.target_dir)?;
+            for target in &targets {
+                let tarball = store::load_tarball(&target.name)?;
+                pack::extract_tarball_to(&tarball, &target.target_dir)?;
+            }
+
+            extract_spinner.stop(format!(
+                "Smuggled {} package(s) into node_modules",
+                style(targets.len()).green()
+            ));
+
+            let _ = cliclack::outro("Done");
         }
-
-        extract_spinner.stop(format!(
-            "Smuggled {} package(s) into node_modules",
-            style(targets.len()).green()
-        ));
-
-        let _ = cliclack::outro("Done");
 
         return Ok(());
     }
@@ -461,6 +519,7 @@ pub fn resolve_targets(
     entries: &[&store::StoreEntry],
     install_dir: &Path,
     workspace_pkg_dirs: &[PathBuf],
+    json: bool,
 ) -> Result<Vec<watch::OverrideTarget>, String> {
     let mut nm_dirs: Vec<PathBuf> = vec![install_dir.join("node_modules")];
     for ws_dir in workspace_pkg_dirs {
@@ -493,10 +552,19 @@ pub fn resolve_targets(
             }
         }
         if !found {
-            let _ = cliclack::log::warning(format!(
-                "{} not found in node_modules — skipping",
-                style(&entry.name).cyan(),
-            ));
+            if json {
+                ci::emit(&ci::Event::Install {
+                    package: &entry.name,
+                    location: None,
+                    status: ci::Status::Skipped,
+                    error: Some("not found in node_modules"),
+                });
+            } else {
+                let _ = cliclack::log::warning(format!(
+                    "{} not found in node_modules — skipping",
+                    style(&entry.name).cyan(),
+                ));
+            }
         }
     }
 

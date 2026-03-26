@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_if)]
 
 mod backup;
+mod ci;
 mod dev;
 mod install;
 mod pack;
@@ -34,6 +35,10 @@ struct Cli {
     /// Swap packages once and exit without watching for changes
     #[arg(long, global = true)]
     once: bool,
+
+    /// Output NDJSON events instead of interactive UI (useful for CI pipelines)
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -113,34 +118,25 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
+    let json = cli.json;
 
-    match cli.command {
+    let result: Result<(), String> = match cli.command {
         Some(Commands::Publish { path, all }) => {
             let pkg_dir = path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            if let Err(e) = publish::cmd_publish(&pkg_dir, all || cli.all) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
+            publish::cmd_publish(&pkg_dir, all || cli.all, json)
         }
         Some(Commands::List) => {
             cmd_list();
+            Ok(())
         }
-        Some(Commands::Unpublish { name }) => {
-            if let Err(e) = cmd_unpublish(&name) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
-        }
+        Some(Commands::Unpublish { name }) => cmd_unpublish(&name),
         Some(Commands::Install { path, all, once }) => {
             let consumer_dir = path
                 .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             let all = all || cli.all;
             let once = once || cli.once;
-            if let Err(e) = install::cmd_install(&consumer_dir, all, once) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
+            install::cmd_install(&consumer_dir, all, once, json)
         }
         Some(Commands::Dev {
             path,
@@ -167,19 +163,22 @@ fn main() {
                 .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             let once = once || cli.once;
-            if let Err(e) = install::cmd_add(&consumer_dir, &name, dev, once) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
+            install::cmd_add(&consumer_dir, &name, dev, once)
         }
         None => {
             // bare `smuggle` = `smuggle install`
             let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            if let Err(e) = install::cmd_install(&consumer_dir, cli.all, cli.once) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
+            install::cmd_install(&consumer_dir, cli.all, cli.once, json)
         }
+    };
+
+    if let Err(e) = result {
+        if json {
+            ci::emit(&ci::Event::Error { message: &e });
+        } else {
+            let _ = cliclack::outro(format!("{}", style(e).red()));
+        }
+        std::process::exit(1);
     }
 }
 

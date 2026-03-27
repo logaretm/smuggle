@@ -113,7 +113,9 @@ pub fn cmd_dev(
     }
 
     // Resolve targets
-    let targets = install::resolve_targets(&all_refs, &consumer_dir, &[])?;
+    let mut dummy_summary = crate::ci::SummaryCollector::new();
+    let targets =
+        install::resolve_targets(&all_refs, &consumer_dir, &[], false, &mut dummy_summary)?;
     if targets.is_empty() {
         return Err("none of the selected packages are installed in node_modules".into());
     }

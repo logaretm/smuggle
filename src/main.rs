@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_if)]
 
 mod backup;
+mod ci;
 mod dev;
 mod install;
 mod pack;
@@ -34,6 +35,10 @@ struct Cli {
     /// Swap packages once and exit without watching for changes
     #[arg(long, global = true)]
     once: bool,
+
+    /// CI mode: implies --all --once, emits NDJSON events, writes GitHub Actions summary
+    #[arg(long, global = true)]
+    ci: bool,
 }
 
 #[derive(Subcommand)]
@@ -114,33 +119,33 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
-        Some(Commands::Publish { path, all }) => {
+    let ci = cli.ci;
+    let all = cli.all || ci;
+    let once = cli.once || ci;
+
+    let mut summary = ci::SummaryCollector::new();
+
+    let result: Result<(), String> = match cli.command {
+        Some(Commands::Publish { path, all: pub_all }) => {
             let pkg_dir = path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            if let Err(e) = publish::cmd_publish(&pkg_dir, all || cli.all) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
+            publish::cmd_publish(&pkg_dir, pub_all || all, ci, &mut summary)
         }
         Some(Commands::List) => {
-            cmd_list();
+            cmd_list(ci);
+            Ok(())
         }
-        Some(Commands::Unpublish { name }) => {
-            if let Err(e) = cmd_unpublish(&name) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
-        }
-        Some(Commands::Install { path, all, once }) => {
+        Some(Commands::Unpublish { name }) => cmd_unpublish(&name),
+        Some(Commands::Install {
+            path,
+            all: inst_all,
+            once: inst_once,
+        }) => {
             let consumer_dir = path
                 .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
-            let all = all || cli.all;
-            let once = once || cli.once;
-            if let Err(e) = install::cmd_install(&consumer_dir, all, once) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
+            let all = inst_all || all;
+            let once = inst_once || once;
+            install::cmd_install(&consumer_dir, all, once, ci, &mut summary)
         }
         Some(Commands::Dev {
             path,
@@ -156,35 +161,53 @@ fn main() {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
+            Ok(())
         }
         Some(Commands::Add {
             name,
             dev,
             path,
-            once,
+            once: add_once,
         }) => {
             let consumer_dir = path
                 .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
-            let once = once || cli.once;
-            if let Err(e) = install::cmd_add(&consumer_dir, &name, dev, once) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
+            let once = add_once || once;
+            install::cmd_add(&consumer_dir, &name, dev, once)
         }
         None => {
             // bare `smuggle` = `smuggle install`
             let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            if let Err(e) = install::cmd_install(&consumer_dir, cli.all, cli.once) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
+            install::cmd_install(&consumer_dir, all, once, ci, &mut summary)
         }
+    };
+
+    // Write GitHub Actions job summary if applicable
+    if ci {
+        summary.write_github_summary();
+    }
+
+    if let Err(e) = result {
+        if ci {
+            ci::emit(&ci::Event::Error { message: &e });
+        } else {
+            let _ = cliclack::outro(format!("{}", style(e).red()));
+        }
+        std::process::exit(1);
     }
 }
 
-fn cmd_list() {
+fn cmd_list(ci: bool) {
     let packages = store::list();
+
+    if ci {
+        // Output as a JSON array
+        if let Ok(out) = serde_json::to_string(&packages) {
+            println!("{out}");
+        }
+        return;
+    }
+
     if packages.is_empty() {
         let _ = cliclack::log::info(format!(
             "No packages registered. Run {} in a package directory first.",

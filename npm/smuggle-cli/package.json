@@ -1,6 +1,6 @@
 {
   "name": "smuggle-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
   "license": "MIT",
@@ -22,11 +22,17 @@
   "bin": {
     "smuggle": "bin/smuggle.ts"
   },
-  "keywords": ["npm", "pnpm", "yarn", "local", "publish"],
+  "keywords": [
+    "npm",
+    "pnpm",
+    "yarn",
+    "local",
+    "publish"
+  ],
   "optionalDependencies": {
-    "@smuggle-cli/darwin-arm64": "0.1.0",
-    "@smuggle-cli/darwin-x64": "0.1.0",
-    "@smuggle-cli/linux-arm64-gnu": "0.1.0",
-    "@smuggle-cli/linux-x64-gnu": "0.1.0"
+    "@smuggle-cli/darwin-arm64": "0.2.0",
+    "@smuggle-cli/darwin-x64": "0.2.0",
+    "@smuggle-cli/linux-arm64-gnu": "0.2.0",
+    "@smuggle-cli/linux-x64-gnu": "0.2.0"
   }
 }

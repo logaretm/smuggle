@@ -15,12 +15,16 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
+            npm_dir: darwin-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
+            npm_dir: darwin-x64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            npm_dir: linux-arm64-gnu
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            npm_dir: linux-x64-gnu
 
     runs-on: ${{ matrix.os }}
 
@@ -52,11 +56,19 @@ jobs:
           tar czf ../../../smuggle-${{ matrix.target }}.tar.gz smuggle
           cd ../../..
 
+      - name: Prepare npm package
+        shell: bash
+        run: |
+          mkdir -p npm/${{ matrix.npm_dir }}/bin
+          cp target/${{ matrix.target }}/release/smuggle npm/${{ matrix.npm_dir }}/bin/smuggle
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: smuggle-${{ matrix.target }}
-          path: smuggle-${{ matrix.target }}.tar.gz
+          path: |
+            smuggle-${{ matrix.target }}.tar.gz
+            npm/${{ matrix.npm_dir }}
 
   release:
     needs: build
@@ -79,3 +91,37 @@ jobs:
             --title "${{ github.ref_name }}" \
             --generate-notes \
             artifacts/*.tar.gz
+
+  npm-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish platform packages
+        run: |
+          for dir in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu; do
+            cd "artifacts/npm/$dir"
+            npm publish --provenance
+            cd "$GITHUB_WORKSPACE"
+          done
+
+      - name: Publish root package
+        run: |
+          cd npm/smuggle-cli
+          npm publish --provenance

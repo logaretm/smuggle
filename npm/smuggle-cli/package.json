@@ -1,0 +1,32 @@
+{
+  "name": "smuggle-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
+  "license": "MIT",
+  "author": "Abdelrahman Awad <me@awad.dev>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/logaretm/smuggle"
+  },
+  "homepage": "https://github.com/logaretm/smuggle",
+  "bugs": {
+    "url": "https://github.com/logaretm/smuggle/issues"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "smuggle": "bin/smuggle.ts"
+  },
+  "keywords": ["npm", "pnpm", "yarn", "local", "publish"],
+  "optionalDependencies": {
+    "@smuggle-cli/darwin-arm64": "0.1.0",
+    "@smuggle-cli/darwin-x64": "0.1.0",
+    "@smuggle-cli/linux-arm64-gnu": "0.1.0",
+    "@smuggle-cli/linux-x64-gnu": "0.1.0"
+  }
+}

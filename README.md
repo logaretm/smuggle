@@ -10,6 +10,12 @@ Smuggle takes a different approach: it packs your local package the same way `np
 
 ## Install
 
+### npm
+
+```sh
+npm install -g smuggle-cli
+```
+
 ### Homebrew
 
 ```sh

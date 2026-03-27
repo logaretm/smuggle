@@ -1,0 +1,22 @@
+{
+  "name": "@smuggle-cli/linux-arm64-gnu",
+  "version": "0.1.0",
+  "description": "smuggle-cli binary for Linux ARM64 (glibc)",
+  "license": "MIT",
+  "author": "Abdelrahman Awad <me@awad.dev>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/logaretm/smuggle"
+  },
+  "homepage": "https://github.com/logaretm/smuggle",
+  "bugs": {
+    "url": "https://github.com/logaretm/smuggle/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "preferUnplugged": true,
+  "libc": ["glibc"]
+}

@@ -25,6 +25,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Bump version
         id: bump
         run: |
@@ -44,11 +48,14 @@ jobs:
           echo "version=$NEW" >> $GITHUB_OUTPUT
           echo "Bumped $CURRENT -> $NEW"
 
+      - name: Bump npm package versions
+        run: node scripts/update-versions.ts "${{ steps.bump.outputs.version }}"
+
       - name: Commit and tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
+          git add Cargo.toml Cargo.lock npm/
           git commit -m "v${{ steps.bump.outputs.version }}"
           git tag "v${{ steps.bump.outputs.version }}"
           git push

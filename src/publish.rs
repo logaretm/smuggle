@@ -7,7 +7,7 @@ use crate::{ci, pack, store, workspace};
 pub fn cmd_publish(
     pkg_dir: &Path,
     select_all: bool,
-    json: bool,
+    ci: bool,
     summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     let pkg_dir = pkg_dir
@@ -19,16 +19,16 @@ pub fn cmd_publish(
 
     // Check for workspace (pnpm or yarn)
     if let Some(ws) = workspace::detect_workspace(&pkg_dir) {
-        return cmd_publish_workspace(&pkg_dir, ws, select_all, json, summary);
+        return cmd_publish_workspace(&pkg_dir, ws, select_all, ci, summary);
     }
 
     // Single package publish
-    publish_single_package(&pkg_dir, json, summary)
+    publish_single_package(&pkg_dir, ci, summary)
 }
 
 fn publish_single_package(
     pkg_dir: &Path,
-    json: bool,
+    ci: bool,
     summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     let pkg_json_path = pkg_dir.join("package.json");
@@ -52,7 +52,7 @@ fn publish_single_package(
 
     let start = Instant::now();
 
-    if json {
+    if ci {
         let tarball = pack::pack(pkg_dir, &pkg_json)?;
         store::save(name, version, pkg_dir, &tarball, &pkg_json.dependencies())?;
         let ms = ci::elapsed_ms(start);
@@ -84,10 +84,10 @@ fn cmd_publish_workspace(
     _root: &Path,
     ws: workspace::DetectedWorkspace,
     select_all: bool,
-    json: bool,
+    ci: bool,
     summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
-    if !json {
+    if !ci {
         let _ = cliclack::intro(style(" smuggle publish ").on_cyan().black());
         cliclack::log::info(format!("Detected {} workspace", ws.kind))
             .map_err(|e| e.to_string())?;
@@ -127,7 +127,7 @@ fn cmd_publish_workspace(
     };
 
     if selected_indices.is_empty() {
-        if !json {
+        if !ci {
             let _ = cliclack::outro("No packages selected, nothing to do.");
         }
         return Ok(());
@@ -139,10 +139,10 @@ fn cmd_publish_workspace(
 
     for &idx in &selected_indices {
         let pkg = &packages[idx];
-        match publish_single_package(&pkg.path, json, summary) {
+        match publish_single_package(&pkg.path, ci, summary) {
             Ok(()) => published += 1,
             Err(e) => {
-                if json {
+                if ci {
                     ci::emit(&ci::Event::Publish {
                         package: &pkg.name,
                         version: &pkg.version,
@@ -160,7 +160,7 @@ fn cmd_publish_workspace(
         }
     }
 
-    if json {
+    if ci {
         ci::emit(&ci::Event::Summary {
             published,
             installed: 0,

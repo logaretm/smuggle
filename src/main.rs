@@ -36,11 +36,7 @@ struct Cli {
     #[arg(long, global = true)]
     once: bool,
 
-    /// Output NDJSON events instead of interactive UI (useful for CI pipelines)
-    #[arg(long, global = true)]
-    json: bool,
-
-    /// CI mode shorthand: implies --all --once --json
+    /// CI mode: implies --all --once, emits NDJSON events, writes GitHub Actions summary
     #[arg(long, global = true)]
     ci: bool,
 }
@@ -123,20 +119,19 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
-    // --ci implies --all --once --json
-    let json = cli.json || cli.ci;
-    let all = cli.all || cli.ci;
-    let once = cli.once || cli.ci;
+    let ci = cli.ci;
+    let all = cli.all || ci;
+    let once = cli.once || ci;
 
     let mut summary = ci::SummaryCollector::new();
 
     let result: Result<(), String> = match cli.command {
         Some(Commands::Publish { path, all: pub_all }) => {
             let pkg_dir = path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            publish::cmd_publish(&pkg_dir, pub_all || all, json, &mut summary)
+            publish::cmd_publish(&pkg_dir, pub_all || all, ci, &mut summary)
         }
         Some(Commands::List) => {
-            cmd_list(json);
+            cmd_list(ci);
             Ok(())
         }
         Some(Commands::Unpublish { name }) => cmd_unpublish(&name),
@@ -150,7 +145,7 @@ fn main() {
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             let all = inst_all || all;
             let once = inst_once || once;
-            install::cmd_install(&consumer_dir, all, once, json, &mut summary)
+            install::cmd_install(&consumer_dir, all, once, ci, &mut summary)
         }
         Some(Commands::Dev {
             path,
@@ -166,6 +161,7 @@ fn main() {
                 let _ = cliclack::outro(format!("{}", style(e).red()));
                 std::process::exit(1);
             }
+            Ok(())
         }
         Some(Commands::Add {
             name,
@@ -182,17 +178,17 @@ fn main() {
         None => {
             // bare `smuggle` = `smuggle install`
             let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            install::cmd_install(&consumer_dir, all, once, json, &mut summary)
+            install::cmd_install(&consumer_dir, all, once, ci, &mut summary)
         }
     };
 
     // Write GitHub Actions job summary if applicable
-    if json {
+    if ci {
         summary.write_github_summary();
     }
 
     if let Err(e) = result {
-        if json {
+        if ci {
             ci::emit(&ci::Event::Error { message: &e });
         } else {
             let _ = cliclack::outro(format!("{}", style(e).red()));
@@ -201,10 +197,10 @@ fn main() {
     }
 }
 
-fn cmd_list(json: bool) {
+fn cmd_list(ci: bool) {
     let packages = store::list();
 
-    if json {
+    if ci {
         // Output as a JSON array
         if let Ok(out) = serde_json::to_string(&packages) {
             println!("{out}");

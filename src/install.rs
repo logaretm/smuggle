@@ -144,7 +144,7 @@ pub fn cmd_install(
     consumer_dir: &Path,
     select_all: bool,
     once: bool,
-    json: bool,
+    ci: bool,
     summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     let consumer_dir = consumer_dir
@@ -156,7 +156,7 @@ pub fn cmd_install(
 
     // Detect workspace (pnpm or yarn)
     if let Some(ws) = workspace::detect_workspace(&consumer_dir) {
-        return cmd_install_workspace(&consumer_dir, ws, select_all, once, json, summary);
+        return cmd_install_workspace(&consumer_dir, ws, select_all, once, ci, summary);
     }
 
     let pkg_json_path = consumer_dir.join("package.json");
@@ -164,7 +164,7 @@ pub fn cmd_install(
         return Err("no package.json found in consumer directory".into());
     }
 
-    if !json {
+    if !ci {
         let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
     }
 
@@ -190,7 +190,7 @@ pub fn cmd_install(
     matches.sort_by(|a, b| a.name.cmp(&b.name));
 
     let selected: Vec<&store::StoreEntry> = if select_all {
-        if !json {
+        if !ci {
             let list: Vec<String> = matches
                 .iter()
                 .map(|e| {
@@ -227,7 +227,7 @@ pub fn cmd_install(
             .map_err(|e| format!("selection cancelled: {e}"))?;
 
         if selections.is_empty() {
-            if !json {
+            if !ci {
                 let _ = cliclack::outro("No packages selected, nothing to do.");
             }
             return Ok(());
@@ -236,7 +236,7 @@ pub fn cmd_install(
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(&consumer_dir, &selected, &[], once, json, summary)
+    run_install_flow(&consumer_dir, &selected, &[], once, ci, summary)
 }
 
 fn cmd_install_workspace(
@@ -244,10 +244,10 @@ fn cmd_install_workspace(
     ws: workspace::DetectedWorkspace,
     select_all: bool,
     once: bool,
-    json: bool,
+    ci: bool,
     summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
-    if !json {
+    if !ci {
         let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
         cliclack::log::info(format!("Detected {} workspace", ws.kind))
             .map_err(|e| e.to_string())?;
@@ -301,7 +301,7 @@ fn cmd_install_workspace(
 
     // Show which workspace packages use which proxied deps
     let selected: Vec<&store::StoreEntry> = if select_all {
-        if !json {
+        if !ci {
             let mut lines = Vec::new();
             for (wp_name, dep_names) in &workspace_dep_map {
                 lines.push(format!("{}:", style(wp_name).bold()));
@@ -335,7 +335,7 @@ fn cmd_install_workspace(
             .map_err(|e| format!("selection cancelled: {e}"))?;
 
         if selections.is_empty() {
-            if !json {
+            if !ci {
                 let _ = cliclack::outro("No packages selected, nothing to do.");
             }
             return Ok(());
@@ -348,7 +348,7 @@ fn cmd_install_workspace(
         .iter()
         .map(|wp| wp.path.clone())
         .collect();
-    run_install_flow(root, &selected, &ws_dirs, once, json, summary)
+    run_install_flow(root, &selected, &ws_dirs, once, ci, summary)
 }
 
 /// Shared install flow: expand deps, overwrite in node_modules, watch for changes.
@@ -358,7 +358,7 @@ fn run_install_flow(
     selected: &[&store::StoreEntry],
     workspace_pkg_dirs: &[PathBuf],
     once: bool,
-    json: bool,
+    ci: bool,
     summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     // Expand: include registered transitive dependencies
@@ -366,7 +366,7 @@ fn run_install_flow(
     let all_entries = expand_with_registered_deps(selected, &registered);
     let all_refs: Vec<&store::StoreEntry> = all_entries.iter().collect();
 
-    if all_refs.len() > selected.len() && !json {
+    if all_refs.len() > selected.len() && !ci {
         let extra: Vec<&str> = all_refs
             .iter()
             .filter(|e| !selected.iter().any(|s| s.name == e.name))
@@ -385,14 +385,14 @@ fn run_install_flow(
     }
 
     // Resolve each package's location in node_modules
-    let targets = resolve_targets(&all_refs, install_dir, workspace_pkg_dirs, json, summary)?;
+    let targets = resolve_targets(&all_refs, install_dir, workspace_pkg_dirs, ci, summary)?;
 
     if targets.is_empty() {
         return Err("none of the selected packages are installed in node_modules".into());
     }
 
     if once {
-        if json {
+        if ci {
             // JSON one-shot mode: emit per-package events with timing
             let mut installed = 0;
             let mut failed = 0;
@@ -541,7 +541,7 @@ pub fn resolve_targets(
     entries: &[&store::StoreEntry],
     install_dir: &Path,
     workspace_pkg_dirs: &[PathBuf],
-    json: bool,
+    ci: bool,
     summary: &mut ci::SummaryCollector,
 ) -> Result<Vec<watch::OverrideTarget>, String> {
     let mut nm_dirs: Vec<PathBuf> = vec![install_dir.join("node_modules")];
@@ -575,7 +575,7 @@ pub fn resolve_targets(
             }
         }
         if !found {
-            if json {
+            if ci {
                 ci::emit(&ci::Event::Install {
                     package: &entry.name,
                     location: None,

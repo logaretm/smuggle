@@ -10,7 +10,7 @@ pub fn is_ci() -> bool {
         .unwrap_or(false)
 }
 
-/// NDJSON event types emitted in --json mode.
+/// NDJSON event types emitted in --ci mode.
 #[derive(Serialize, Clone)]
 #[serde(tag = "event")]
 pub enum Event<'a> {
@@ -89,7 +89,14 @@ impl SummaryCollector {
         }
     }
 
-    pub fn push(&mut self, action: &str, package: &str, version: &str, status: &str, duration_ms: u64) {
+    pub fn push(
+        &mut self,
+        action: &str,
+        package: &str,
+        version: &str,
+        status: &str,
+        duration_ms: u64,
+    ) {
         self.rows.push(SummaryRow {
             action: action.to_string(),
             package: package.to_string(),
@@ -101,20 +108,34 @@ impl SummaryCollector {
 
     /// Write a markdown summary table to `$GITHUB_STEP_SUMMARY` if the env var is set.
     pub fn write_github_summary(&self) {
-        let Some(path) = std::env::var("GITHUB_STEP_SUMMARY").ok().filter(|p| !p.is_empty()) else {
+        let Some(path) = std::env::var("GITHUB_STEP_SUMMARY")
+            .ok()
+            .filter(|p| !p.is_empty())
+        else {
             return;
         };
 
         let total_ms = elapsed_ms(self.start);
-        let published = self.rows.iter().filter(|r| r.action == "publish" && r.status == "ok").count();
-        let installed = self.rows.iter().filter(|r| r.action == "install" && r.status == "ok").count();
+        let published = self
+            .rows
+            .iter()
+            .filter(|r| r.action == "publish" && r.status == "ok")
+            .count();
+        let installed = self
+            .rows
+            .iter()
+            .filter(|r| r.action == "install" && r.status == "ok")
+            .count();
         let failed = self.rows.iter().filter(|r| r.status == "error").count();
 
         let mut md = String::new();
         md.push_str("### 📦 Smuggle Summary\n\n");
         md.push_str(&format!(
             "**{}** published, **{}** installed, **{}** failed — completed in {}\n\n",
-            published, installed, failed, format_duration(total_ms)
+            published,
+            installed,
+            failed,
+            format_duration(total_ms)
         ));
 
         if !self.rows.is_empty() {

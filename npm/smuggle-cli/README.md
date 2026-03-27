@@ -1,85 +1,101 @@
 # smuggle
 
-Test local npm packages in real consumer projects — no symlinks, no lockfile pollution, no `.npmrc` hacks.
+Smuggle local npm packages into your projects — no symlinks, no lockfile pollution.
 
-## The Problem
+## Why?
 
-Testing local packages usually means `npm link`, `pnpm link`, or `file:` references. All of these have tradeoffs:
+Testing local packages in a real consumer project usually means `npm link`, `pnpm link`, or `file:` references. All of these pollute your lockfile, break with pnpm's content-addressable store, or behave differently from a real install.
 
-- **`npm link` / `pnpm link`** — symlinks break pnpm's content-addressable store, cause duplicate dependencies, and behave differently from a real install
-- **`file:` / `link:` references** — pollute `package.json` and lockfiles, easy to accidentally commit
-- **Local registries (Verdaccio)** — heavyweight setup for a simple dev loop
+Smuggle takes a different approach: it packs your local package the same way `npm publish` would, then directly replaces the installed copy in `node_modules`. Your lockfile and `package.json` stay untouched. When you're done, originals are restored automatically.
 
-## The Solution
+## Install
 
-Smuggle packs your local package the same way `npm publish` would, then directly replaces the installed copy in `node_modules`. Your lockfile and `package.json` stay untouched. When you're done, originals are restored automatically.
-
-```
-npm install -g smuggle-cli
-```
-
-## Quick Start
-
-**1. Register your local package:**
+### npm / pnpm / yarn
 
 ```sh
-cd ~/my-library
+npm install -g smuggle-cli
+# or
+pnpm add -g smuggle-cli
+# or
+yarn global add smuggle-cli
+```
+
+### Homebrew
+
+```sh
+brew install logaretm/tap/smuggle
+```
+
+### Cargo
+
+```sh
+cargo install smuggle
+```
+
+### From source
+
+```sh
+git clone https://github.com/logaretm/smuggle.git
+cd smuggle
+cargo install --path .
+```
+
+## Usage
+
+### 1. Publish local packages
+
+In your package directory (or workspace root):
+
+```sh
 smuggle publish
 ```
 
-**2. Use it in a consumer project:**
+This packs the package and registers it locally in `~/.smuggle/packages/`. In a pnpm workspace, you'll be prompted to select which packages to publish.
+
+Use `--all` to skip the prompt and publish all non-private packages:
 
 ```sh
-cd ~/my-app
-smuggle install
+smuggle publish --all
 ```
 
-That's it. Smuggle will:
+### 2. Install into a consumer project
 
-- Find registered packages that match your dependencies
-- Back up the originals from `node_modules`
-- Extract your local build directly into `node_modules`
-- Clear bundler caches (Vite, Next.js, webpack)
-- Watch for changes and hot-swap on save
-- Restore everything on exit (<kbd>Ctrl</kbd>+<kbd>C</kbd>)
-
-## Commands
-
-### `smuggle publish`
-
-Pack and register local packages in `~/.smuggle/packages/`. In a pnpm workspace, you'll be prompted to select which packages to publish.
-
-```sh
-smuggle publish        # interactive select
-smuggle publish --all  # all non-private packages
-```
-
-### `smuggle install`
-
-Install registered packages into the current project. Shorthand: just `smuggle` with no arguments.
+In your consumer project directory:
 
 ```sh
 smuggle install
-smuggle          # same thing
 ```
 
-### `smuggle add <package>`
-
-Add a registered package as a dependency — installs it via your package manager and then smuggles the local version in.
+Or just:
 
 ```sh
-smuggle add @scope/my-pkg
+smuggle
 ```
 
-### `smuggle list`
+This will:
 
-List all registered packages.
+1. Find registered packages that match the consumer's dependencies
+2. Let you select which ones to proxy
+3. Auto-include transitive dependencies that are also registered
+4. Back up the originals from `node_modules`
+5. Extract your local packages directly into `node_modules`
+6. Clear bundler caches (Vite, Next.js, webpack) and touch `vite.config.*` to trigger a restart
+7. Watch for changes in the source packages — on change, re-pack and re-extract instantly
+8. Restore everything on exit (ctrl-c)
 
-### `smuggle unpublish <package>`
+### 3. List registered packages
 
-Remove a package from the local registry.
+```sh
+smuggle list
+```
 
-## How It Works
+### 4. Remove a registered package
+
+```sh
+smuggle unpublish @scope/my-pkg
+```
+
+## How it works
 
 ```
 smuggle publish                     smuggle install
@@ -104,46 +120,21 @@ smuggle publish                     smuggle install
                                       On exit: restore originals
 ```
 
-## Design
+Key design decisions:
 
-- **No symlinks** — packages are real files in `node_modules`, identical to a normal install
-- **No lockfile changes** — `pnpm-lock.yaml`, `package-lock.json`, and `yarn.lock` stay untouched
+- **No symlinks** — packages are real files in `node_modules`, just like a normal install
+- **No lockfile changes** — your `pnpm-lock.yaml` / `package-lock.json` / `yarn.lock` stays untouched
 - **No `.npmrc` changes** — no registry overrides needed
 - **No `package.json` changes** — version ranges are preserved
-- **Automatic cleanup** — originals are restored on exit, even on <kbd>Ctrl</kbd>+<kbd>C</kbd>
-- **Hash-based change detection** — only re-extracts and busts caches when the packed output actually changes
-- **Workspace-aware** — detects pnpm workspaces and resolves transitive dependencies
+- **Automatic cleanup** — originals are restored on exit, even on ctrl-c
+- **Hash-based change detection** — only triggers cache busting and Vite restarts when the packed output actually changes
+- **Workspace support** — detects pnpm workspaces and scans all member packages for matching dependencies
 
-## Supported Package Managers
+## Supported package managers
 
 - pnpm (including workspaces)
 - npm
 - yarn
-
-## Alternative Installation Methods
-
-### Homebrew
-
-```sh
-brew install logaretm/tap/smuggle
-```
-
-### Cargo
-
-```sh
-cargo install smuggle
-```
-
-## Supported Platforms
-
-| Platform | Architecture | Package |
-|----------|-------------|---------|
-| macOS | Apple Silicon (arm64) | `@smuggle-cli/darwin-arm64` |
-| macOS | Intel (x64) | `@smuggle-cli/darwin-x64` |
-| Linux | arm64 (glibc) | `@smuggle-cli/linux-arm64-gnu` |
-| Linux | x64 (glibc) | `@smuggle-cli/linux-x64-gnu` |
-
-The correct binary is installed automatically based on your platform.
 
 ## License
 

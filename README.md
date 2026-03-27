@@ -10,10 +10,14 @@ Smuggle takes a different approach: it packs your local package the same way `np
 
 ## Install
 
-### npm
+### npm / pnpm / yarn
 
 ```sh
 npm install -g smuggle-cli
+# or
+pnpm add -g smuggle-cli
+# or
+yarn global add smuggle-cli
 ```
 
 ### Homebrew

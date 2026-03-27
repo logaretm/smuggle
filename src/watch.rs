@@ -1,5 +1,7 @@
 use console::style;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{backup, pack, pm, store};
 
@@ -9,12 +11,46 @@ pub struct OverrideTarget {
     pub target_dir: PathBuf,
 }
 
+/// What to do after successfully swapping packages in node_modules.
+pub enum PostSwapAction<'a> {
+    /// Clear bundler caches and touch vite configs to trigger HMR reload.
+    ClearCachesAndTouch {
+        consumer_dir: &'a Path,
+        workspace_pkg_dirs: &'a [PathBuf],
+    },
+    /// Call a function after each swap (e.g. to restart a dev server).
+    #[allow(clippy::type_complexity)]
+    Notify {
+        /// Called after each successful swap with the list of changed package names.
+        on_swap: Box<dyn FnMut(&[String]) + 'a>,
+    },
+}
+
 /// Watch source directories for changes and re-extract tarballs when content changes.
+/// If `shutdown` is provided, the loop exits when the flag is set.
 pub fn watch_and_reinstall(
     selected: &[&store::StoreEntry],
     targets: &[OverrideTarget],
-    consumer_dir: &Path,
-    workspace_pkg_dirs: &[PathBuf],
+    action: &mut PostSwapAction<'_>,
+) -> Result<(), String> {
+    watch_and_reinstall_inner(selected, targets, action, None)
+}
+
+/// Like `watch_and_reinstall`, but exits when `shutdown` is set to true.
+pub fn watch_and_reinstall_until(
+    selected: &[&store::StoreEntry],
+    targets: &[OverrideTarget],
+    action: &mut PostSwapAction<'_>,
+    shutdown: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    watch_and_reinstall_inner(selected, targets, action, Some(shutdown))
+}
+
+fn watch_and_reinstall_inner(
+    selected: &[&store::StoreEntry],
+    targets: &[OverrideTarget],
+    action: &mut PostSwapAction<'_>,
+    shutdown: Option<&Arc<AtomicBool>>,
 ) -> Result<(), String> {
     use notify::{RecursiveMode, Watcher};
     use std::collections::HashMap;
@@ -64,9 +100,28 @@ pub fn watch_and_reinstall(
     let batch_window = Duration::from_secs(5);
     let stabilize_delay = Duration::from_secs(1);
 
+    let poll_interval = Duration::from_millis(200);
+
     loop {
-        let Ok(first_event) = rx.recv() else {
-            break;
+        // Check shutdown flag before blocking
+        if let Some(flag) = shutdown {
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+
+        // Use recv_timeout so we can check the shutdown flag periodically
+        let first_event = if shutdown.is_some() {
+            match rx.recv_timeout(poll_interval) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(event) => event,
+                Err(_) => break,
+            }
         };
 
         let batch_start = Instant::now();
@@ -162,31 +217,35 @@ pub fn watch_and_reinstall(
             }
         }
 
-        // Transactional extraction: backup, extract all, rollback on failure
+        // Extract changed packages into node_modules
         let mut actually_changed: Vec<String> = Vec::new();
         if !to_extract.is_empty() {
-            let backup_pairs: Vec<(String, PathBuf)> = to_extract
-                .iter()
-                .map(|(name, _, target)| (name.clone(), target.clone()))
-                .collect();
+            let use_backup = matches!(action, PostSwapAction::ClearCachesAndTouch { .. });
 
-            let backup_base = match backup::backup_targets(&backup_pairs) {
-                Ok(b) => b,
-                Err(e) => {
-                    spinner.stop(format!("{} backup failed: {e}", style("✗").red()));
-                    continue;
+            let backup_state = if use_backup {
+                let backup_pairs: Vec<(String, PathBuf)> = to_extract
+                    .iter()
+                    .map(|(name, _, target)| (name.clone(), target.clone()))
+                    .collect();
+                match backup::backup_targets(&backup_pairs) {
+                    Ok(base) => Some((base, backup_pairs)),
+                    Err(e) => {
+                        spinner.stop(format!("{} backup failed: {e}", style("✗").red()));
+                        continue;
+                    }
                 }
+            } else {
+                None
             };
 
             spinner.start(format!("Smuggling {} package(s)...", to_extract.len()));
             let mut failed = false;
             for (pkg_name, tarball, target_dir) in &to_extract {
                 if let Err(e) = pack::extract_tarball_to(tarball, target_dir) {
-                    spinner.stop(format!(
-                        "{} extraction failed: {e} — rolling back",
-                        style("✗").red()
-                    ));
-                    backup::restore_all(&backup_base, &backup_pairs);
+                    spinner.stop(format!("{} extraction failed: {e}", style("✗").red()));
+                    if let Some((ref base, ref pairs)) = backup_state {
+                        backup::restore_all(base, pairs);
+                    }
                     failed = true;
                     break;
                 }
@@ -194,8 +253,9 @@ pub fn watch_and_reinstall(
             }
 
             if !failed {
-                // Extraction succeeded, remove backup
-                let _ = std::fs::remove_dir_all(&backup_base);
+                if let Some((ref base, _)) = backup_state {
+                    let _ = std::fs::remove_dir_all(base);
+                }
             } else {
                 actually_changed.clear();
             }
@@ -206,15 +266,25 @@ pub fn watch_and_reinstall(
             continue;
         }
 
-        // Clear bundler caches and trigger vite restart
-        let extra: Vec<&Path> = workspace_pkg_dirs.iter().map(|p| p.as_path()).collect();
-        pm::clear_bundler_caches(consumer_dir, &extra);
-        pm::touch_vite_configs(consumer_dir, workspace_pkg_dirs);
-
         spinner.stop(format!(
             "Smuggled {}",
             style(actually_changed.join(", ")).cyan()
         ));
+
+        // Post-swap action
+        match action {
+            PostSwapAction::ClearCachesAndTouch {
+                consumer_dir,
+                workspace_pkg_dirs,
+            } => {
+                let extra: Vec<&Path> = workspace_pkg_dirs.iter().map(|p| p.as_path()).collect();
+                pm::clear_bundler_caches(consumer_dir, &extra);
+                pm::touch_vite_configs(consumer_dir, workspace_pkg_dirs);
+            }
+            PostSwapAction::Notify { on_swap } => {
+                on_swap(&actually_changed);
+            }
+        }
     }
 
     Ok(())

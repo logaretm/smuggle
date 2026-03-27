@@ -111,7 +111,14 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
         target_dir,
     }];
     let entry_refs: Vec<&store::StoreEntry> = vec![entry];
-    watch::watch_and_reinstall(&entry_refs, &targets, &consumer_dir, &[])?;
+    watch::watch_and_reinstall(
+        &entry_refs,
+        &targets,
+        &mut watch::PostSwapAction::ClearCachesAndTouch {
+            consumer_dir: &consumer_dir,
+            workspace_pkg_dirs: &[],
+        },
+    )?;
 
     // Cleanup on normal exit
     let restore_spinner = cliclack::spinner();
@@ -429,7 +436,14 @@ fn run_install_flow(
     .map_err(|e| e.to_string())?;
 
     // Watch for changes
-    watch::watch_and_reinstall(&all_refs, &targets, install_dir, workspace_pkg_dirs)?;
+    watch::watch_and_reinstall(
+        &all_refs,
+        &targets,
+        &mut watch::PostSwapAction::ClearCachesAndTouch {
+            consumer_dir: install_dir,
+            workspace_pkg_dirs,
+        },
+    )?;
 
     // Cleanup on normal exit — restore originals
     let restore_spinner = cliclack::spinner();
@@ -443,7 +457,7 @@ fn run_install_flow(
 }
 
 /// Resolve each package to its real location in node_modules.
-fn resolve_targets(
+pub fn resolve_targets(
     entries: &[&store::StoreEntry],
     install_dir: &Path,
     workspace_pkg_dirs: &[PathBuf],
@@ -574,7 +588,7 @@ fn extract_all(targets: &[watch::OverrideTarget]) -> Result<(), String> {
 
 /// Expand the selected set to include any registered packages that are
 /// transitive dependencies of the selected packages.
-fn expand_with_registered_deps(
+pub fn expand_with_registered_deps(
     selected: &[&store::StoreEntry],
     registered: &[store::StoreEntry],
 ) -> Vec<store::StoreEntry> {

@@ -97,11 +97,41 @@ pub fn setup_ctrlc_restore(backup_base: PathBuf, targets: Vec<(PathBuf, PathBuf)
     });
 }
 
-/// Set up a ctrl-c handler for "added" packages: remove injected dirs and restore package.json.
+/// Snapshot a file's current contents (or record its absence) so it can be
+/// restored later. Used for lockfiles that a package manager is about to
+/// rewrite during `smuggle add`.
+#[derive(Clone)]
+pub struct FileSnapshot {
+    pub path: PathBuf,
+    pub original: Option<Vec<u8>>,
+}
+
+impl FileSnapshot {
+    pub fn capture(path: PathBuf) -> Self {
+        let original = std::fs::read(&path).ok();
+        Self { path, original }
+    }
+
+    pub fn restore(&self) {
+        match &self.original {
+            Some(bytes) => {
+                let _ = std::fs::write(&self.path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+/// Set up a ctrl-c handler for "added" packages: remove injected dirs,
+/// restore package.json, and restore any lockfile snapshots taken before
+/// the package manager ran.
 pub fn setup_ctrlc_add_cleanup(
     added_dirs: Vec<PathBuf>,
     pkg_json_path: PathBuf,
     original_pkg_json: String,
+    lockfile_snapshots: Vec<FileSnapshot>,
 ) {
     let _ = ctrlc::set_handler(move || {
         for dir in &added_dirs {
@@ -112,7 +142,10 @@ pub fn setup_ctrlc_add_cleanup(
             }
         }
         let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
-        eprintln!("\n  Reverted package.json and removed added packages");
+        for snap in &lockfile_snapshots {
+            snap.restore();
+        }
+        eprintln!("\n  Reverted package.json, lockfile, and removed added packages");
         std::process::exit(0);
     });
 }

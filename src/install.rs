@@ -39,13 +39,22 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
         ));
     }
 
-    // Add to package.json
     let dep_key = if dev {
         "devDependencies"
     } else {
         "dependencies"
     };
-    let version_spec = format!("^{}", entry.version);
+
+    // Point the new entry at the local tarball so the package manager
+    // resolves this exact smuggled version (and its transitive deps match).
+    let tarball_path = store::tarball_path(name);
+    if !tarball_path.exists() {
+        return Err(format!(
+            "tarball for {} is missing from the store — try `smuggle publish` again",
+            style(name).cyan(),
+        ));
+    }
+    let version_spec = format!("file:{}", tarball_path.display());
 
     let original_pkg_json = std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?;
     let mut pkg_value: serde_json::Value =
@@ -67,34 +76,108 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
     ))
     .map_err(|e| e.to_string())?;
 
-    // Ensure node_modules exists
+    // Snapshot every lockfile the PM might touch so we can restore them later.
+    let detected_pm = pm::detect_package_manager(&consumer_dir);
+    let lockfile_snapshots: Vec<backup::FileSnapshot> = pm::lockfile_candidates(&consumer_dir, detected_pm)
+        .into_iter()
+        .map(backup::FileSnapshot::capture)
+        .collect();
+
+    // Run the package manager so it resolves and installs the smuggled
+    // tarball's transitive dependencies. Lockfile changes will be reverted
+    // on exit — we only want the side-effect of populating node_modules.
+    let install_spinner = cliclack::spinner();
+    install_spinner.start(format!(
+        "Running `{} install` to resolve {}'s dependencies...",
+        detected_pm,
+        style(name).cyan(),
+    ));
+    if let Err(e) = pm::run_install(&consumer_dir) {
+        install_spinner.stop(format!("{} install failed: {e}", style("✗").red()));
+        // Roll back package.json and any lockfile churn before returning.
+        let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
+        for snap in &lockfile_snapshots {
+            snap.restore();
+        }
+        return Err(format!("install aborted: {e}"));
+    }
+    install_spinner.stop(format!(
+        "Installed {}'s transitive dependencies",
+        style(name).green(),
+    ));
+
+    // Ensure node_modules exists (PM install should have created it).
     let nm_dir = consumer_dir.join("node_modules");
     std::fs::create_dir_all(&nm_dir).map_err(|e| format!("failed to create node_modules: {e}"))?;
 
-    // Create target directory and extract tarball
-    let target_dir = nm_dir.join(name);
-    std::fs::create_dir_all(&target_dir)
-        .map_err(|e| format!("failed to create {}: {e}", target_dir.display()))?;
+    // Step 3: overlay the smuggled tarball(s) on top of what the PM unpacked.
+    // Expand transitively so any registered smuggled packages that ended up
+    // pulled from the registry (likely stale / wrong version) get replaced
+    // with the local tarball version.
+    let primary_refs: Vec<&store::StoreEntry> = vec![entry];
+    let expanded = expand_with_registered_deps(&primary_refs, &registered);
+    let all_refs: Vec<&store::StoreEntry> = expanded.iter().collect();
+
+    if all_refs.len() > 1 {
+        let extra: Vec<&str> = all_refs
+            .iter()
+            .filter(|e| e.name != name)
+            .map(|e| e.name.as_str())
+            .collect();
+        let _ = cliclack::log::info(format!(
+            "Also overlaying {} registered transitive dep(s): {}",
+            extra.len(),
+            extra
+                .iter()
+                .map(|n| style(n).cyan().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
+
+    // Resolve every smuggled package's real location in node_modules. The
+    // primary package lives at the top level (PM just installed it there);
+    // transitive deps may live in pnpm's virtual store or nested paths.
+    let primary_target_dir = nm_dir.join(name);
+    std::fs::create_dir_all(&primary_target_dir)
+        .map_err(|e| format!("failed to create {}: {e}", primary_target_dir.display()))?;
+
+    let mut summary = ci::SummaryCollector::new();
+    let targets = resolve_targets(&all_refs, &consumer_dir, &[], false, &mut summary)?;
+    if targets.is_empty() {
+        return Err("no smuggled packages ended up in node_modules after install".into());
+    }
 
     let extract_spinner = cliclack::spinner();
-    extract_spinner.start(format!("Smuggling {}...", style(name).cyan()));
-
-    let tarball = store::load_tarball(name)?;
-    pack::extract_tarball_to(&tarball, &target_dir)?;
-
+    extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
+    if let Err(e) = extract_all(&targets) {
+        extract_spinner.stop(format!("{} extraction failed: {e}", style("✗").red()));
+        let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
+        for snap in &lockfile_snapshots {
+            snap.restore();
+        }
+        return Err(format!("add aborted: {e}"));
+    }
     extract_spinner.stop(format!(
-        "Smuggled {} into node_modules",
-        style(name).green()
+        "Smuggled {} package(s) into node_modules",
+        style(targets.len()).green()
     ));
 
     if once {
-        let _ = cliclack::outro("Done (package.json was modified — remember to revert if needed)");
+        let _ = cliclack::outro("Done (package.json and lockfile were modified — remember to revert if needed)");
         return Ok(());
     }
 
-    // Set up cleanup on ctrl-c
-    let added_dirs = vec![target_dir.clone()];
-    backup::setup_ctrlc_add_cleanup(added_dirs, pkg_json_path.clone(), original_pkg_json.clone());
+    // Set up cleanup on ctrl-c. We only wipe the primary package's dir; any
+    // transitive overlays live in locations the PM owns and will be rewritten
+    // on the user's next install anyway.
+    let added_dirs = vec![primary_target_dir.clone()];
+    backup::setup_ctrlc_add_cleanup(
+        added_dirs,
+        pkg_json_path.clone(),
+        original_pkg_json.clone(),
+        lockfile_snapshots.clone(),
+    );
 
     // Clear bundler caches
     pm::clear_bundler_caches(&consumer_dir, &[]);
@@ -106,14 +189,9 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
     ))
     .map_err(|e| e.to_string())?;
 
-    // Watch for changes
-    let targets = vec![watch::OverrideTarget {
-        name: entry.name.clone(),
-        target_dir,
-    }];
-    let entry_refs: Vec<&store::StoreEntry> = vec![entry];
+    // Watch for changes on every smuggled package we overlaid.
     watch::watch_and_reinstall(
-        &entry_refs,
+        &all_refs,
         &targets,
         &mut watch::PostSwapAction::ClearCachesAndTouch {
             consumer_dir: &consumer_dir,
@@ -123,17 +201,18 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
 
     // Cleanup on normal exit
     let restore_spinner = cliclack::spinner();
-    restore_spinner.start("Reverting package.json and removing added packages...");
+    restore_spinner.start("Reverting package.json, lockfile, and removing added packages...");
 
-    for target in &targets {
-        let _ = std::fs::remove_dir_all(&target.target_dir);
-        if let Some(parent) = target.target_dir.parent() {
-            let _ = std::fs::remove_dir(parent); // only removes if empty (scoped packages)
-        }
+    let _ = std::fs::remove_dir_all(&primary_target_dir);
+    if let Some(parent) = primary_target_dir.parent() {
+        let _ = std::fs::remove_dir(parent); // only removes if empty (scoped packages)
     }
     std::fs::write(&pkg_json_path, &original_pkg_json).map_err(|e| e.to_string())?;
+    for snap in &lockfile_snapshots {
+        snap.restore();
+    }
 
-    restore_spinner.stop("Reverted package.json and removed added packages");
+    restore_spinner.stop("Reverted package.json, lockfile, and removed added packages");
 
     let _ = cliclack::outro("Done");
 

@@ -86,6 +86,50 @@ pub fn detect_package_manager(dir: &Path) -> &'static str {
     }
 }
 
+/// Return the lockfile paths that may exist for a given package manager.
+/// We back up every candidate a PM may touch (e.g. pnpm may create both
+/// pnpm-lock.yaml and node_modules/.modules.yaml).
+pub fn lockfile_candidates(dir: &Path, pm: &str) -> Vec<PathBuf> {
+    match pm {
+        "pnpm" => vec![dir.join("pnpm-lock.yaml")],
+        "yarn" => vec![dir.join("yarn.lock")],
+        "bun" => vec![dir.join("bun.lockb"), dir.join("bun.lock")],
+        _ => vec![dir.join("package-lock.json")],
+    }
+}
+
+/// Run the package manager's install in `consumer_dir`. Used after writing
+/// a `file:` reference into package.json so the PM resolves and installs
+/// the smuggled package's transitive deps. Callers must back up the
+/// lockfile beforehand and restore it afterwards.
+pub fn run_install(consumer_dir: &Path) -> Result<(), String> {
+    let pm = detect_package_manager(consumer_dir);
+    let (cmd, args): (&str, &[&str]) = match pm {
+        "pnpm" => ("pnpm", &["install", "--no-frozen-lockfile"]),
+        "yarn" => ("yarn", &["install"]),
+        "bun" => ("bun", &["install"]),
+        _ => ("npm", &["install"]),
+    };
+
+    let status = std::process::Command::new(cmd)
+        .args(args)
+        .current_dir(consumer_dir)
+        .status()
+        .map_err(|e| format!("failed to run `{cmd} {}`: {e}", args.join(" ")))?;
+
+    if !status.success() {
+        return Err(format!(
+            "`{cmd} {}` exited with {}",
+            args.join(" "),
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into()),
+        ));
+    }
+    Ok(())
+}
+
 /// Check if a package.json in the given directory has a specific script.
 pub fn has_script(dir: &Path, script: &str) -> bool {
     let pkg_json_path = dir.join("package.json");

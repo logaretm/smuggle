@@ -55,6 +55,10 @@ pub fn load_tarball(name: &str) -> Result<Vec<u8>, String> {
     fs::read(&tarball_path).map_err(|e| format!("failed to read tarball: {e}"))
 }
 
+pub fn tarball_path(name: &str) -> PathBuf {
+    pkg_dir(name).join("package.tgz")
+}
+
 pub fn list() -> Vec<StoreEntry> {
     let dir = store_dir();
     if !dir.exists() {

@@ -78,10 +78,11 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
 
     // Snapshot every lockfile the PM might touch so we can restore them later.
     let detected_pm = pm::detect_package_manager(&consumer_dir);
-    let lockfile_snapshots: Vec<backup::FileSnapshot> = pm::lockfile_candidates(&consumer_dir, detected_pm)
-        .into_iter()
-        .map(backup::FileSnapshot::capture)
-        .collect();
+    let lockfile_snapshots: Vec<backup::FileSnapshot> =
+        pm::lockfile_candidates(&consumer_dir, detected_pm)
+            .into_iter()
+            .map(backup::FileSnapshot::capture)
+            .collect();
 
     // Run the package manager so it resolves and installs the smuggled
     // tarball's transitive dependencies. Lockfile changes will be reverted
@@ -164,7 +165,9 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
     ));
 
     if once {
-        let _ = cliclack::outro("Done (package.json and lockfile were modified — remember to revert if needed)");
+        let _ = cliclack::outro(
+            "Done (package.json and lockfile were modified — remember to revert if needed)",
+        );
         return Ok(());
     }
 

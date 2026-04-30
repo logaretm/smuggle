@@ -4,7 +4,11 @@ use std::time::Instant;
 
 use crate::{backup, ci, pack, pm, store, watch, workspace};
 
-pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result<(), String> {
+pub fn cmd_add(consumer_dir: &Path, names: &[String], dev: bool, once: bool) -> Result<(), String> {
+    if names.is_empty() {
+        return Err("please specify at least one package name".into());
+    }
+
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
@@ -16,27 +20,36 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
 
     let _ = cliclack::intro(style(" smuggle add ").on_cyan().black());
 
-    // Look up the package in the store
     let registered = store::list();
-    let entry = registered.iter().find(|e| e.name == name).ok_or_else(|| {
-        format!(
-            "{} is not registered. Run {} in the package directory first.",
-            style(name).cyan(),
-            style("smuggle publish").cyan(),
-        )
-    })?;
 
-    // Check if the package is already in dependencies
     let consumer_pkg: pack::ConsumerPackageJson =
         serde_json::from_str(&std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?)
             .map_err(|e| format!("failed to parse consumer package.json: {e}"))?;
 
-    if consumer_pkg.all_dependency_names().contains(&entry.name) {
-        return Err(format!(
-            "{} is already in your dependencies. Use {} instead.",
-            style(name).cyan(),
-            style("smuggle install").cyan(),
-        ));
+    let mut entries: Vec<&store::StoreEntry> = Vec::with_capacity(names.len());
+    let mut new_names: Vec<&String> = Vec::new();
+    for name in names {
+        let entry = registered.iter().find(|e| e.name == *name).ok_or_else(|| {
+            format!(
+                "{} is not registered. Run {} in the package directory first.",
+                style(name).cyan(),
+                style("smuggle publish").cyan(),
+            )
+        })?;
+
+        let tarball_path = store::tarball_path(name);
+        if !tarball_path.exists() {
+            return Err(format!(
+                "tarball for {} is missing from the store — try `smuggle publish` again",
+                style(name).cyan(),
+            ));
+        }
+
+        if !consumer_pkg.all_dependency_names().contains(&entry.name) {
+            new_names.push(name);
+        }
+
+        entries.push(entry);
     }
 
     let dep_key = if dev {
@@ -45,17 +58,6 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
         "dependencies"
     };
 
-    // Point the new entry at the local tarball so the package manager
-    // resolves this exact smuggled version (and its transitive deps match).
-    let tarball_path = store::tarball_path(name);
-    if !tarball_path.exists() {
-        return Err(format!(
-            "tarball for {} is missing from the store — try `smuggle publish` again",
-            style(name).cyan(),
-        ));
-    }
-    let version_spec = format!("file:{}", tarball_path.display());
-
     let original_pkg_json = std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?;
     let mut pkg_value: serde_json::Value =
         serde_json::from_str(&original_pkg_json).map_err(|e| e.to_string())?;
@@ -63,20 +65,21 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
     if pkg_value.get(dep_key).is_none() {
         pkg_value[dep_key] = serde_json::json!({});
     }
-    pkg_value[dep_key][name] = serde_json::Value::String(version_spec.clone());
 
-    let new_pkg_json = serde_json::to_string_pretty(&pkg_value).map_err(|e| e.to_string())?;
-    std::fs::write(&pkg_json_path, format!("{new_pkg_json}\n")).map_err(|e| e.to_string())?;
+    for name in &new_names {
+        let tarball_path = store::tarball_path(name);
+        let version_spec = format!("file:{}", tarball_path.display());
+        pkg_value[dep_key][name] = serde_json::Value::String(version_spec.clone());
 
-    cliclack::log::info(format!(
-        "Added {} to {} as {}",
-        style(name).cyan(),
-        style(dep_key).dim(),
-        style(&version_spec).dim(),
-    ))
-    .map_err(|e| e.to_string())?;
+        cliclack::log::info(format!(
+            "Added {} to {} as {}",
+            style(name).cyan(),
+            style(dep_key).dim(),
+            style(&version_spec).dim(),
+        ))
+        .map_err(|e| e.to_string())?;
+    }
 
-    // Snapshot every lockfile the PM might touch so we can restore them later.
     let detected_pm = pm::detect_package_manager(&consumer_dir);
     let lockfile_snapshots: Vec<backup::FileSnapshot> =
         pm::lockfile_candidates(&consumer_dir, detected_pm)
@@ -84,47 +87,49 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
             .map(backup::FileSnapshot::capture)
             .collect();
 
-    // Run the package manager so it resolves and installs the smuggled
-    // tarball's transitive dependencies. Lockfile changes will be reverted
-    // on exit — we only want the side-effect of populating node_modules.
-    let install_spinner = cliclack::spinner();
-    install_spinner.start(format!(
-        "Running `{} install` to resolve {}'s dependencies...",
-        detected_pm,
-        style(name).cyan(),
-    ));
-    if let Err(e) = pm::run_install(&consumer_dir) {
-        install_spinner.stop(format!("{} install failed: {e}", style("✗").red()));
-        // Roll back package.json and any lockfile churn before returning.
-        let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
-        for snap in &lockfile_snapshots {
-            snap.restore();
-        }
-        return Err(format!("install aborted: {e}"));
-    }
-    install_spinner.stop(format!(
-        "Installed {}'s transitive dependencies",
-        style(name).green(),
-    ));
+    if !new_names.is_empty() {
+        let new_pkg_json =
+            serde_json::to_string_pretty(&pkg_value).map_err(|e| e.to_string())?;
+        std::fs::write(&pkg_json_path, format!("{new_pkg_json}\n"))
+            .map_err(|e| e.to_string())?;
 
-    // Ensure node_modules exists (PM install should have created it).
+        let new_display = new_names
+            .iter()
+            .map(|n| style(n).cyan().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let install_spinner = cliclack::spinner();
+        install_spinner.start(format!(
+            "Running `{} install` to resolve dependencies for {}...",
+            detected_pm, new_display,
+        ));
+        if let Err(e) = pm::run_install(&consumer_dir) {
+            install_spinner.stop(format!("{} install failed: {e}", style("✗").red()));
+            let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
+            for snap in &lockfile_snapshots {
+                snap.restore();
+            }
+            return Err(format!("install aborted: {e}"));
+        }
+        install_spinner.stop(format!(
+            "Installed transitive dependencies for {}",
+            new_display,
+        ));
+    }
+
     let nm_dir = consumer_dir.join("node_modules");
     std::fs::create_dir_all(&nm_dir).map_err(|e| format!("failed to create node_modules: {e}"))?;
 
-    // Step 3: overlay the smuggled tarball(s) on top of what the PM unpacked.
-    // Expand transitively so any registered smuggled packages that ended up
-    // pulled from the registry (likely stale / wrong version) get replaced
-    // with the local tarball version.
-    let primary_refs: Vec<&store::StoreEntry> = vec![entry];
-    let expanded = expand_with_registered_deps(&primary_refs, &registered);
+    let expanded = expand_with_registered_deps(&entries, &registered);
     let all_refs: Vec<&store::StoreEntry> = expanded.iter().collect();
 
-    if all_refs.len() > 1 {
-        let extra: Vec<&str> = all_refs
-            .iter()
-            .filter(|e| e.name != name)
-            .map(|e| e.name.as_str())
-            .collect();
+    let extra: Vec<&str> = all_refs
+        .iter()
+        .filter(|e| !names.iter().any(|n| **n == e.name))
+        .map(|e| e.name.as_str())
+        .collect();
+    if !extra.is_empty() {
         let _ = cliclack::log::info(format!(
             "Also overlaying {} registered transitive dep(s): {}",
             extra.len(),
@@ -136,12 +141,12 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
         ));
     }
 
-    // Resolve every smuggled package's real location in node_modules. The
-    // primary package lives at the top level (PM just installed it there);
-    // transitive deps may live in pnpm's virtual store or nested paths.
-    let primary_target_dir = nm_dir.join(name);
-    std::fs::create_dir_all(&primary_target_dir)
-        .map_err(|e| format!("failed to create {}: {e}", primary_target_dir.display()))?;
+    for name in names {
+        let target_dir = nm_dir.join(name);
+        std::fs::create_dir_all(&target_dir)
+            .map_err(|e| format!("failed to create {}: {e}", target_dir.display()))?;
+    }
+    let added_dirs: Vec<PathBuf> = new_names.iter().map(|n| nm_dir.join(n)).collect();
 
     let mut summary = ci::SummaryCollector::new();
     let targets = resolve_targets(&all_refs, &consumer_dir, &[], false, &mut summary)?;
@@ -171,18 +176,13 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
         return Ok(());
     }
 
-    // Set up cleanup on ctrl-c. We only wipe the primary package's dir; any
-    // transitive overlays live in locations the PM owns and will be rewritten
-    // on the user's next install anyway.
-    let added_dirs = vec![primary_target_dir.clone()];
     backup::setup_ctrlc_add_cleanup(
-        added_dirs,
+        added_dirs.clone(),
         pkg_json_path.clone(),
         original_pkg_json.clone(),
         lockfile_snapshots.clone(),
     );
 
-    // Clear bundler caches
     pm::clear_bundler_caches(&consumer_dir, &[]);
     pm::touch_vite_configs(&consumer_dir, &[]);
 
@@ -192,7 +192,6 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
     ))
     .map_err(|e| e.to_string())?;
 
-    // Watch for changes on every smuggled package we overlaid.
     watch::watch_and_reinstall(
         &all_refs,
         &targets,
@@ -202,13 +201,14 @@ pub fn cmd_add(consumer_dir: &Path, name: &str, dev: bool, once: bool) -> Result
         },
     )?;
 
-    // Cleanup on normal exit
     let restore_spinner = cliclack::spinner();
     restore_spinner.start("Reverting package.json, lockfile, and removing added packages...");
 
-    let _ = std::fs::remove_dir_all(&primary_target_dir);
-    if let Some(parent) = primary_target_dir.parent() {
-        let _ = std::fs::remove_dir(parent); // only removes if empty (scoped packages)
+    for target_dir in &added_dirs {
+        let _ = std::fs::remove_dir_all(target_dir);
+        if let Some(parent) = target_dir.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
     std::fs::write(&pkg_json_path, &original_pkg_json).map_err(|e| e.to_string())?;
     for snap in &lockfile_snapshots {

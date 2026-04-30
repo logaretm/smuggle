@@ -80,8 +80,8 @@ enum Commands {
 
     /// Add a registered package that isn't yet in your dependencies
     Add {
-        /// Package name (must be registered via `smuggle publish`)
-        name: String,
+        /// Package name(s) (must be registered via `smuggle publish`)
+        names: Vec<String>,
 
         /// Add as a devDependency instead of a dependency
         #[arg(long)]
@@ -164,7 +164,7 @@ fn main() {
             Ok(())
         }
         Some(Commands::Add {
-            name,
+            names,
             dev,
             path,
             once: add_once,
@@ -173,7 +173,7 @@ fn main() {
                 .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             let once = add_once || once;
-            install::cmd_add(&consumer_dir, &name, dev, once)
+            install::cmd_add(&consumer_dir, &names, dev, once)
         }
         None => {
             // bare `smuggle` = `smuggle install`

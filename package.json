@@ -1,0 +1,29 @@
+{
+  "name": "smuggle",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/logaretm/smuggle.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/logaretm/smuggle/issues"
+  },
+  "homepage": "https://github.com/logaretm/smuggle#readme",
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  }
+}

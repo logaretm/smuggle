@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <!-- Box body -->
+  <path d="M20 52 L64 76 L108 52 L108 96 L64 120 L20 96 Z" fill="#8b4513" stroke="#6b3410" stroke-width="2"/>
+
+  <!-- Box left face -->
+  <path d="M20 52 L64 76 L64 120 L20 96 Z" fill="#a0522d"/>
+
+  <!-- Box right face -->
+  <path d="M64 76 L108 52 L108 96 L64 120 Z" fill="#6b3410"/>
+
+  <!-- Box lid back -->
+  <path d="M20 52 L64 28 L108 52 L64 76 Z" fill="#b7410e" stroke="#8b2f0a" stroke-width="2"/>
+
+  <!-- Lid flap left (slightly open) -->
+  <path d="M20 52 L64 28 L64 38 L24 58 Z" fill="#d2691e" stroke="#b7410e" stroke-width="1.5"/>
+
+  <!-- Lid flap right (slightly open, lifted) -->
+  <path d="M108 52 L64 28 L64 18 L104 38 Z" fill="#cd853f" stroke="#b7410e" stroke-width="1.5"/>
+
+  <!-- Package peeking out from open lid -->
+  <rect x="52" y="22" width="24" height="28" rx="2" fill="#f5deb3" stroke="#d2691e" stroke-width="1.5"/>
+
+  <!-- Package braces { } -->
+  <text x="57" y="42" font-family="monospace" font-size="16" font-weight="bold" fill="#b7410e">{}</text>
+
+  <!-- Tape strip on box -->
+  <path d="M42 64 L64 76 L86 64" stroke="#d2691e" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M64 76 L64 108" stroke="#d2691e" stroke-width="3" fill="none" stroke-linecap="round"/>
+</svg>

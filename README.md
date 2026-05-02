@@ -1,6 +1,10 @@
-# smuggle
+<p align="center">
+  <img src="docs/public/logo.svg" alt="smuggle" width="128" height="128" />
+</p>
 
-Smuggle local npm packages into your projects — no symlinks, no lockfile pollution.
+<h1 align="center">smuggle</h1>
+
+<p align="center">Smuggle local npm packages into your projects — no symlinks, no lockfile pollution.</p>
 
 ## Why?
 

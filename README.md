@@ -83,17 +83,63 @@ This will:
 7. Watch for changes in the source packages — on change, re-pack and re-extract instantly
 8. Restore everything on exit (ctrl-c)
 
-### 3. List registered packages
+### 3. Add a new dependency from a registered package
+
+```sh
+smuggle add @scope/my-pkg
+# or multiple at once
+smuggle add @scope/pkg-a @scope/pkg-b
+```
+
+This adds the package(s) to your `package.json` dependencies (resolving transitive deps via your package manager), then swaps them with the local versions. Use `--dev` to add as devDependencies instead.
+
+> **Note:** `smuggle add` is mainly useful for packages that haven't been released yet and aren't in your `package.json`. If the package is already a dependency, just run `smuggle` with no subcommand.
+
+### 4. Run your dev server with local packages
+
+```sh
+smuggle dev
+```
+
+This combines `smuggle install` with your dev server — it swaps packages, starts the dev server (auto-detected from your `package.json` "dev" script), and watches for changes. You can pass a custom command:
+
+```sh
+smuggle dev -- npm run start
+```
+
+Use `--restart` to kill and restart the dev server on each package change instead of relying on HMR.
+
+### 5. List registered packages
 
 ```sh
 smuggle list
 ```
 
-### 4. Remove a registered package
+### 6. Remove a registered package
 
 ```sh
 smuggle unpublish @scope/my-pkg
 ```
+
+## Flags
+
+### Global flags
+
+These flags can be passed to any command (or to `smuggle` with no subcommand):
+
+| Flag | Description |
+|------|-------------|
+| `-p, --path <PATH>` | Path to the project directory (defaults to current directory) |
+| `--all` | Select all matching packages without prompting |
+| `--once` | Swap packages once and exit without watching for changes |
+| `--ci` | CI mode: implies `--all --once`, emits NDJSON events, writes GitHub Actions summary |
+
+### Command-specific flags
+
+| Command | Flag | Description |
+|---------|------|-------------|
+| `add` | `--dev` | Add as a devDependency instead of a dependency |
+| `dev` | `--restart` | Kill and restart the dev server on each package change (instead of relying on HMR) |
 
 ## How it works
 
@@ -125,7 +171,7 @@ Key design decisions:
 - **No symlinks** — packages are real files in `node_modules`, just like a normal install
 - **No lockfile changes** — your `pnpm-lock.yaml` / `package-lock.json` / `yarn.lock` stays untouched
 - **No `.npmrc` changes** — no registry overrides needed
-- **No `package.json` changes** — version ranges are preserved
+- **No `package.json` changes** — version ranges are preserved (`smuggle install`; `smuggle add` does modify `package.json` to add the dependency)
 - **Automatic cleanup** — originals are restored on exit, even on ctrl-c
 - **Hash-based change detection** — only triggers cache busting and Vite restarts when the packed output actually changes
 - **Workspace support** — detects pnpm workspaces and scans all member packages for matching dependencies

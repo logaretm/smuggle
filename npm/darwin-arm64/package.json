@@ -1,6 +1,6 @@
 {
   "name": "@smuggle-cli/darwin-arm64",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "smuggle-cli binary for macOS ARM64 (Apple Silicon)",
   "license": "MIT",
   "author": "Abdelrahman Awad <me@awad.dev>",

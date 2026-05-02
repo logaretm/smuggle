@@ -1,6 +1,6 @@
 {
   "name": "@smuggle-cli/linux-x64-gnu",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "smuggle-cli binary for Linux x64 (glibc)",
   "license": "MIT",
   "author": "Abdelrahman Awad <me@awad.dev>",

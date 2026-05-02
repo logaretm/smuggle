@@ -2,39 +2,17 @@
 
 ## Installation
 
-### npm / pnpm / yarn
+Pick your favorite package manager.
 
-```sh
-npm install -g smuggle-cli
-# or
-pnpm add -g smuggle-cli
-# or
-yarn global add smuggle-cli
-```
-
-### Homebrew
-
-```sh
-brew install logaretm/tap/smuggle
-```
-
-### Cargo
-
-```sh
-cargo install smuggle
-```
-
-### From source
-
-```sh
-git clone https://github.com/logaretm/smuggle.git
-cd smuggle
-cargo install --path .
-```
+<InstallTabs />
 
 ## Quick start
 
-### 1. Register your local package
+<Steps>
+
+<li>
+
+### Register your local package
 
 In your package directory (or workspace root):
 
@@ -50,7 +28,11 @@ Use `--all` to skip the prompt and publish all non-private packages:
 smuggle publish --all
 ```
 
-### 2. Swap into your consumer project
+</li>
+
+<li>
+
+### Swap into your consumer project
 
 In your consumer project directory:
 
@@ -58,13 +40,21 @@ In your consumer project directory:
 smuggle
 ```
 
-This will find registered packages that match the consumer's dependencies, let you select which ones to swap, back up the originals, extract your local packages into `node_modules`, and watch for changes.
+This finds registered packages that match the consumer's dependencies, lets you select which ones to swap, backs up the originals, extracts your local packages into `node_modules`, and watches for changes.
 
 Press `ctrl-c` to stop watching and restore the originals.
 
-### 3. Iterate
+</li>
+
+<li>
+
+### Iterate
 
 Edit your source package — smuggle detects the change, re-packs, and re-extracts automatically. Bundler caches (Vite, Next.js, webpack) are cleared and `vite.config.*` is touched to trigger a restart.
+
+</li>
+
+</Steps>
 
 ## Supported package managers
 

@@ -1,10 +1,16 @@
 # CI / Non-Interactive Usage
 
-By default, `smuggle install`, `smuggle add`, and `smuggle dev` start a **file watcher that blocks** until you press ctrl-c. They also show **interactive prompts** to select packages.
+By default, `smuggle install`, `smuggle add`, and `smuggle dev` start a **file watcher that blocks** until you press <kbd>Ctrl</kbd>+<kbd>C</kbd>. They also show **interactive prompts** to select packages.
 
-For scripts, CI pipelines, and non-interactive environments (including LLMs/AI agents), you need to disable both behaviors.
+For scripts, CI pipelines, and non-interactive environments (including LLMs / AI agents), you need to disable both behaviors.
 
-## `--once` — skip the file watcher
+<Callout kind="tip" title="Two flags to remember">
+
+`--once` skips the watcher. `--all` skips the prompts. The combined `--ci` does both, plus emits machine-readable output.
+
+</Callout>
+
+## `--once` &nbsp;skip the watcher
 
 Swap packages and exit immediately:
 
@@ -13,9 +19,9 @@ smuggle publish --all
 smuggle install --all --once
 ```
 
-This is the recommended approach for any automated workflow that just needs to swap packages once.
+Recommended for any automated workflow that just needs to swap packages once.
 
-## `--ci` — full CI mode
+## `--ci` &nbsp;full CI mode
 
 The `--ci` flag implies both `--all` and `--once`, plus:
 
@@ -27,11 +33,38 @@ smuggle publish --ci
 smuggle install --ci
 ```
 
+## GitHub Actions example
+
+```yaml
+- name: Smuggle local package
+  run: |
+    cd packages/my-pkg
+    smuggle publish --ci
+
+- name: Run consumer tests with smuggled deps
+  run: |
+    cd apps/consumer
+    smuggle install --ci
+    npm test
+```
+
+<Callout kind="info" title="Job summary">
+
+When `--ci` runs inside GitHub Actions it appends a markdown table to `$GITHUB_STEP_SUMMARY` listing every package that was packed or swapped — handy for verifying what landed in the run.
+
+</Callout>
+
 ## Quick reference
 
-| Scenario | Flags |
-|----------|-------|
-| Script / automation | `--all --once` |
-| CI pipeline | `--ci` |
-| AI agent / LLM | `--all --once` |
-| Interactive development | _(none, defaults are fine)_ |
+| Scenario                | Flags                              |
+| ----------------------- | ---------------------------------- |
+| Script / automation     | `--all --once`                     |
+| CI pipeline             | `--ci`                             |
+| AI agent / LLM          | `--all --once`                     |
+| Interactive development | _(none — defaults are fine)_       |
+
+<Callout kind="warn" title="Heads up">
+
+Without `--once`, smuggle keeps a foreground watcher running. CI runners will hang until they hit a step timeout.
+
+</Callout>

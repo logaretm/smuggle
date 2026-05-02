@@ -1,15 +1,6 @@
 # Commands
 
-## Overview
-
-| Command | Description | Blocking? |
-|---------|-------------|-----------|
-| `smuggle publish` | Pack and register local packages | No |
-| `smuggle` / `smuggle install` | Swap registered packages into node_modules | Yes (file watcher) |
-| `smuggle add <pkg>` | Add an unreleased package and swap it in | Yes (file watcher) |
-| `smuggle dev` | Swap packages and run your dev server | Yes (until ctrl-c) |
-| `smuggle list` | List all registered packages | No |
-| `smuggle unpublish` | Remove a registered package | No |
+<CommandsOverview />
 
 ## `smuggle publish`
 
@@ -51,13 +42,15 @@ Add unreleased packages to your `package.json` dependencies and swap them in.
 ```sh
 smuggle add @scope/my-pkg
 smuggle add @scope/pkg-a @scope/pkg-b    # multiple packages
-smuggle add @scope/my-pkg --dev           # as devDependency
-smuggle add @scope/my-pkg --once          # don't start file watcher
+smuggle add @scope/my-pkg --dev          # as devDependency
+smuggle add @scope/my-pkg --once         # don't start file watcher
 ```
 
-::: tip
+<Callout kind="tip" title="When to use add">
+
 `smuggle add` is for packages that haven't been released yet and aren't in your `package.json`. If the package is already a dependency, just run `smuggle` with no subcommand.
-:::
+
+</Callout>
 
 ## `smuggle dev`
 

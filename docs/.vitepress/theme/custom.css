@@ -1,0 +1,316 @@
+/* Smuggle docs — global polish */
+
+:root {
+  --vp-font-family-base: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
+    Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --vp-font-family-mono: "JetBrains Mono", ui-monospace, SFMono-Regular,
+    "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --sm-rust-1: #b7410e;
+  --sm-rust-2: #d2691e;
+  --sm-rust-3: #8b4513;
+  --sm-bronze: #cd853f;
+  --sm-cream: #f5deb3;
+}
+
+/* Selection */
+::selection {
+  background: rgba(210, 105, 30, 0.28);
+  color: var(--vp-c-text-1);
+}
+
+/* Custom scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(210, 105, 30, 0.35) transparent;
+}
+
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(210, 105, 30, 0.3);
+  border-radius: 999px;
+  border: 2px solid var(--vp-c-bg);
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(210, 105, 30, 0.55); }
+
+/* kbd */
+kbd {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  margin: 0 0.15rem;
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.78em;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+
+/* Tables */
+.vp-doc table {
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+  overflow: hidden;
+  display: table;
+  width: 100%;
+  margin: 1.25rem 0 1.5rem;
+}
+
+.vp-doc th {
+  background: linear-gradient(180deg, var(--vp-c-bg-soft), var(--vp-c-bg));
+  font-weight: 600;
+  font-size: 0.85rem;
+  letter-spacing: 0.005em;
+  border-bottom: 1px solid var(--vp-c-divider);
+  border-top: 0;
+  padding: 0.7rem 0.95rem;
+  text-align: left;
+}
+
+.vp-doc td {
+  padding: 0.7rem 0.95rem;
+  border: 0;
+  border-top: 1px solid var(--vp-c-divider);
+  font-size: 0.88rem;
+}
+
+.vp-doc tr:first-child td { border-top: 0; }
+
+.vp-doc tr:nth-child(2n) td {
+  background: rgba(0, 0, 0, 0.015);
+}
+
+.dark .vp-doc tr:nth-child(2n) td {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.vp-doc tr:hover td {
+  background: rgba(210, 105, 30, 0.04);
+}
+
+.dark .vp-doc tr:hover td {
+  background: rgba(210, 105, 30, 0.06);
+}
+
+.vp-doc table code {
+  font-size: 0.85em;
+  padding: 0.12rem 0.4rem;
+  background: var(--vp-c-bg);
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* Inline code */
+.vp-doc :not(pre) > code {
+  font-size: 0.86em;
+  padding: 0.13rem 0.42rem;
+  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-divider);
+  color: var(--vp-c-text-1);
+  border-radius: 5px;
+  font-family: var(--vp-font-family-mono);
+}
+
+.vp-doc h1 > code,
+.vp-doc h2 > code,
+.vp-doc h3 > code {
+  font-size: 0.9em;
+  background: linear-gradient(135deg, rgba(210, 105, 30, 0.12), rgba(183, 65, 14, 0.04));
+  border-color: rgba(210, 105, 30, 0.3);
+  color: var(--sm-rust-2);
+}
+
+.dark .vp-doc h1 > code,
+.dark .vp-doc h2 > code,
+.dark .vp-doc h3 > code {
+  color: #e8a070;
+}
+
+/* Code blocks */
+.vp-doc div[class*="language-"] {
+  border-radius: 10px;
+  border: 1px solid var(--vp-c-divider);
+  margin: 1rem 0 1.5rem;
+  position: relative;
+  overflow: hidden;
+}
+
+.vp-doc div[class*="language-"]:hover .copy {
+  opacity: 1;
+}
+
+.vp-doc div[class*="language-"] pre {
+  padding: 1.1rem 1.25rem;
+}
+
+.vp-doc div[class*="language-"]::before {
+  font-family: var(--vp-font-family-mono);
+  font-size: 0.7rem;
+  color: var(--vp-c-text-3);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+/* Links */
+.vp-doc a {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: color 0.2s ease, text-decoration-color 0.2s ease;
+}
+
+.vp-doc a:hover {
+  text-decoration-color: var(--sm-rust-2);
+}
+
+/* Headings */
+.vp-doc h1 {
+  letter-spacing: -0.022em;
+  font-weight: 800;
+}
+
+.vp-doc h2 {
+  letter-spacing: -0.014em;
+  font-weight: 700;
+  border-top: 1px solid var(--vp-c-divider);
+  padding-top: 1.5rem;
+  margin-top: 2.5rem;
+}
+
+.vp-doc h3 {
+  letter-spacing: -0.008em;
+  font-weight: 600;
+  margin-top: 2rem;
+}
+
+/* Heading anchors — softer */
+.vp-doc .header-anchor {
+  color: var(--sm-rust-2);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.vp-doc h1:hover .header-anchor,
+.vp-doc h2:hover .header-anchor,
+.vp-doc h3:hover .header-anchor,
+.vp-doc h4:hover .header-anchor {
+  opacity: 0.7;
+}
+
+.vp-doc .header-anchor:hover {
+  opacity: 1 !important;
+  text-decoration: none;
+}
+
+/* Blockquotes — branded accent */
+.vp-doc blockquote {
+  border-left: 3px solid;
+  border-image: linear-gradient(180deg, var(--sm-rust-1), var(--sm-rust-2)) 1;
+  padding: 0.6rem 0 0.6rem 1rem;
+  margin: 1.25rem 0;
+  font-style: normal;
+  background: linear-gradient(90deg, rgba(210, 105, 30, 0.04), transparent 60%);
+  border-radius: 0 6px 6px 0;
+}
+
+.vp-doc blockquote > p { color: var(--vp-c-text-1); margin: 0.4rem 0; }
+
+/* Hero refinement */
+.VPHero .name,
+.VPHero .text {
+  letter-spacing: -0.025em !important;
+}
+
+.VPHero .tagline {
+  font-size: 1.15rem !important;
+  line-height: 1.5 !important;
+  color: var(--vp-c-text-2) !important;
+  max-width: 580px;
+}
+
+.VPHero .actions {
+  gap: 0.65rem !important;
+}
+
+.VPButton.brand {
+  background: linear-gradient(135deg, #b7410e, #d2691e) !important;
+  border-color: rgba(210, 105, 30, 0.5) !important;
+  box-shadow: 0 0 0 0 rgba(210, 105, 30, 0.4), 0 6px 16px -6px rgba(183, 65, 14, 0.5);
+  transition: all 0.25s ease;
+}
+
+.VPButton.brand:hover {
+  background: linear-gradient(135deg, #c4490f, #e0712a) !important;
+  box-shadow: 0 0 0 4px rgba(210, 105, 30, 0.18), 0 10px 24px -8px rgba(183, 65, 14, 0.6);
+  transform: translateY(-1px);
+}
+
+.VPButton.alt {
+  background: var(--vp-c-bg-soft) !important;
+  border-color: var(--vp-c-divider) !important;
+  transition: all 0.25s ease;
+}
+
+.VPButton.alt:hover {
+  border-color: rgba(210, 105, 30, 0.4) !important;
+  color: var(--sm-rust-2) !important;
+}
+
+/* Sidebar polish */
+.VPSidebarItem.is-active > .item .link {
+  color: var(--sm-rust-2) !important;
+}
+
+.VPSidebarItem.is-active > .item .indicator {
+  background-color: var(--sm-rust-2) !important;
+}
+
+.VPSidebarItem .link:hover {
+  color: var(--sm-rust-2) !important;
+}
+
+/* Nav polish */
+.VPNavBarMenuLink:hover,
+.VPNavBarMenuLink.active {
+  color: var(--sm-rust-2) !important;
+}
+
+/* Default features (if any page still uses them) */
+.VPFeature {
+  border-color: var(--vp-c-divider) !important;
+  transition: all 0.3s ease;
+}
+
+.VPFeature:hover {
+  border-color: rgba(210, 105, 30, 0.5) !important;
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px -12px rgba(183, 65, 14, 0.3);
+}
+
+/* Hide default features section since we use HeroFeatures */
+.VPHomeFeatures { display: none; }
+
+/* Smooth focus rings */
+*:focus-visible {
+  outline: 2px solid var(--sm-rust-2);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

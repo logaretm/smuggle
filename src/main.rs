@@ -18,7 +18,8 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "smuggle",
-    about = "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution"
+    about = "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
+    after_help = "By default, install/add/dev start a file watcher that blocks until you press ctrl-c.\nUse --once to swap packages and exit immediately (useful for scripts and non-interactive environments).\nUse --ci for CI pipelines (implies --all --once, emits NDJSON, writes GitHub Actions summary)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,61 +29,61 @@ struct Cli {
     #[arg(short, long, global = true)]
     path: Option<PathBuf>,
 
-    /// Select all matching packages without prompting
+    /// Skip interactive prompts and select all matching packages automatically
     #[arg(long, global = true)]
     all: bool,
 
-    /// Swap packages once and exit without watching for changes
+    /// Swap packages once and exit immediately (without starting the file watcher)
     #[arg(long, global = true)]
     once: bool,
 
-    /// CI mode: implies --all --once, emits NDJSON events, writes GitHub Actions summary
+    /// CI mode: implies --all --once, emits NDJSON events to stdout, writes GitHub Actions job summary
     #[arg(long, global = true)]
     ci: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pack and register a local package for later use
+    /// Pack and register a local package for later use (non-blocking, exits after packing)
     Publish {
         /// Path to the package directory (defaults to current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
 
-        /// In a workspace, publish all non-private packages without prompting
+        /// In a workspace, publish all non-private packages (skip interactive selection)
         #[arg(long)]
         all: bool,
     },
 
-    /// List all registered local packages
+    /// List all registered local packages (non-blocking)
     List,
 
-    /// Remove a registered package
+    /// Remove a registered package (non-blocking)
     Unpublish {
-        /// Package name (e.g. @scope/my-pkg). If omitted, prompts for selection.
+        /// Package name (e.g. @scope/my-pkg). If omitted, shows interactive selection.
         name: Option<String>,
 
-        /// Remove all registered packages without prompting
+        /// Remove all registered packages (skip interactive selection)
         #[arg(long)]
         all: bool,
     },
 
-    /// Install registered packages into a consumer project
+    /// Swap registered packages into node_modules (blocks with file watcher unless --once is passed)
     Install {
         /// Path to the consumer project (defaults to current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
 
-        /// Select all matching packages without prompting
+        /// Skip interactive prompts and select all matching packages
         #[arg(long)]
         all: bool,
 
-        /// Swap packages once and exit without watching for changes
+        /// Swap packages and exit immediately (don't start the file watcher)
         #[arg(long)]
         once: bool,
     },
 
-    /// Add a registered package that isn't yet in your dependencies
+    /// Add an unreleased package to your dependencies and swap it in (blocks with file watcher unless --once is passed)
     Add {
         /// Package name(s) (must be registered via `smuggle publish`)
         names: Vec<String>,
@@ -95,18 +96,18 @@ enum Commands {
         #[arg(short, long)]
         path: Option<PathBuf>,
 
-        /// Swap packages once and exit without watching for changes
+        /// Swap packages and exit immediately (don't start the file watcher)
         #[arg(long)]
         once: bool,
     },
 
-    /// Swap local packages and run your dev server
+    /// Swap local packages and run your dev server (blocks until ctrl-c)
     Dev {
         /// Path to the consumer project (defaults to current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
 
-        /// Select all matching packages without prompting
+        /// Skip interactive prompts and select all matching packages
         #[arg(long)]
         all: bool,
 

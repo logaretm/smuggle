@@ -51,7 +51,7 @@ cargo install --path .
 | `smuggle list` | List all registered packages |
 | `smuggle unpublish <pkg>` | Remove a registered package |
 
-### 1. Publish local packages
+### `smuggle publish`
 
 In your package directory (or workspace root):
 
@@ -67,7 +67,7 @@ Use `--all` to skip the prompt and publish all non-private packages:
 smuggle publish --all
 ```
 
-### 2. Install into a consumer project
+### `smuggle install`
 
 In your consumer project directory:
 
@@ -92,7 +92,7 @@ This will:
 7. Watch for changes in the source packages — on change, re-pack and re-extract instantly
 8. Restore everything on exit (ctrl-c)
 
-### 3. Add a new dependency from a registered package
+### `smuggle add`
 
 ```sh
 smuggle add @scope/my-pkg
@@ -104,7 +104,7 @@ This adds the package(s) to your `package.json` dependencies (resolving transiti
 
 > **Note:** `smuggle add` is mainly useful for packages that haven't been released yet and aren't in your `package.json`. If the package is already a dependency, just run `smuggle` with no subcommand.
 
-### 4. Run your dev server with local packages
+### `smuggle dev`
 
 ```sh
 smuggle dev
@@ -118,13 +118,13 @@ smuggle dev -- npm run start
 
 Use `--restart` to kill and restart the dev server on each package change instead of relying on HMR.
 
-### 5. List registered packages
+### `smuggle list`
 
 ```sh
 smuggle list
 ```
 
-### 6. Remove a registered package
+### `smuggle unpublish`
 
 ```sh
 smuggle unpublish @scope/my-pkg

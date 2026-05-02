@@ -136,6 +136,25 @@ Key design decisions:
 - npm
 - yarn
 
+## Development
+
+This project uses [just](https://github.com/casey/just) as a command runner. Run all CI checks locally:
+
+```sh
+just check
+```
+
+Or run individual steps:
+
+```sh
+just fmt    # check formatting
+just lint   # clippy lints
+just build  # compile
+just test   # tests
+```
+
+You'll need the `rustfmt` and `clippy` components (included with `rustup` by default). The CI also expects Node.js and pnpm to be available for integration tests.
+
 ## License
 
 MIT

@@ -88,10 +88,8 @@ pub fn cmd_add(consumer_dir: &Path, names: &[String], dev: bool, once: bool) -> 
             .collect();
 
     if !new_names.is_empty() {
-        let new_pkg_json =
-            serde_json::to_string_pretty(&pkg_value).map_err(|e| e.to_string())?;
-        std::fs::write(&pkg_json_path, format!("{new_pkg_json}\n"))
-            .map_err(|e| e.to_string())?;
+        let new_pkg_json = serde_json::to_string_pretty(&pkg_value).map_err(|e| e.to_string())?;
+        std::fs::write(&pkg_json_path, format!("{new_pkg_json}\n")).map_err(|e| e.to_string())?;
 
         let new_display = new_names
             .iter()

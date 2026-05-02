@@ -22,7 +22,7 @@
   "bugs": {
     "url": "https://github.com/logaretm/smuggle/issues"
   },
-  "homepage": "https://github.com/logaretm/smuggle#readme",
+  "homepage": "https://awad.dev/smuggle/",
   "devDependencies": {
     "vitepress": "^1.6.4"
   }

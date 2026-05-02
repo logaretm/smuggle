@@ -21,3 +21,7 @@ features:
   - title: Instant feedback
     details: File watcher re-packs and re-extracts on every change with hash-based change detection.
 ---
+
+## How it works
+
+<ProcessDiagram />

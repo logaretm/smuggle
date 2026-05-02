@@ -42,6 +42,7 @@ function generateLlmsTxt(siteConfig: { outDir: string; srcDir: string }) {
 }
 
 export default defineConfig({
+  base: "/smuggle/",
   title: "Smuggle",
   description:
     "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",

@@ -1,29 +1,49 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
-  <!-- Box body -->
-  <path d="M20 52 L64 76 L108 52 L108 96 L64 120 L20 96 Z" fill="#8b4513" stroke="#6b3410" stroke-width="2"/>
+  <defs>
+    <linearGradient id="sm-front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d2691e"/>
+      <stop offset="1" stop-color="#a0360b"/>
+    </linearGradient>
+    <linearGradient id="sm-top" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#cd853f"/>
+      <stop offset="1" stop-color="#e8a070"/>
+    </linearGradient>
+    <linearGradient id="sm-right" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#8b2f0a"/>
+      <stop offset="1" stop-color="#6b2407"/>
+    </linearGradient>
+    <linearGradient id="sm-tape-front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a0360b"/>
+      <stop offset="1" stop-color="#7a2807"/>
+    </linearGradient>
+  </defs>
 
-  <!-- Box left face -->
-  <path d="M20 52 L64 76 L64 120 L20 96 Z" fill="#a0522d"/>
+  <!-- Soft ground shadow -->
+  <ellipse cx="68" cy="118" rx="48" ry="5" fill="#000" opacity="0.22"/>
 
-  <!-- Box right face -->
-  <path d="M64 76 L108 52 L108 96 L64 120 Z" fill="#6b3410"/>
+  <!-- Right face -->
+  <path d="M96 48 L96 112 L112 96 L112 32 Z"
+        fill="url(#sm-right)" stroke="#4a1505" stroke-width="2" stroke-linejoin="round"/>
 
-  <!-- Box lid back -->
-  <path d="M20 52 L64 28 L108 52 L64 76 Z" fill="#b7410e" stroke="#8b2f0a" stroke-width="2"/>
+  <!-- Top face -->
+  <path d="M24 48 L40 32 L112 32 L96 48 Z"
+        fill="url(#sm-top)" stroke="#4a1505" stroke-width="2" stroke-linejoin="round"/>
 
-  <!-- Lid flap left (slightly open) -->
-  <path d="M20 52 L64 28 L64 38 L24 58 Z" fill="#d2691e" stroke="#b7410e" stroke-width="1.5"/>
+  <!-- Tape strip across the top, drawn on the top face -->
+  <path d="M52 48 L68 32 L84 32 L68 48 Z"
+        fill="#b7410e" stroke="#4a1505" stroke-width="1.2" stroke-linejoin="round" opacity="0.85"/>
 
-  <!-- Lid flap right (slightly open, lifted) -->
-  <path d="M108 52 L64 28 L64 18 L104 38 Z" fill="#cd853f" stroke="#b7410e" stroke-width="1.5"/>
+  <!-- Front face -->
+  <path d="M24 48 L96 48 L96 112 L24 112 Z"
+        fill="url(#sm-front)" stroke="#4a1505" stroke-width="2" stroke-linejoin="round"/>
 
-  <!-- Package peeking out from open lid -->
-  <rect x="52" y="22" width="24" height="28" rx="2" fill="#f5deb3" stroke="#d2691e" stroke-width="1.5"/>
+  <!-- Tape strip down the front -->
+  <path d="M52 48 L68 48 L68 112 L52 112 Z"
+        fill="url(#sm-tape-front)" stroke="#4a1505" stroke-width="1.2" stroke-linejoin="round" opacity="0.85"/>
 
-  <!-- Package braces { } -->
-  <text x="57" y="42" font-family="monospace" font-size="16" font-weight="bold" fill="#b7410e">{}</text>
-
-  <!-- Tape strip on box -->
-  <path d="M42 64 L64 76 L86 64" stroke="#d2691e" stroke-width="3" fill="none" stroke-linecap="round"/>
-  <path d="M64 76 L64 108" stroke="#d2691e" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <!-- {} braces stamped on the front -->
+  <g stroke="#fff5e6" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M50 64 Q42 64 42 71 L42 77 Q42 80 36 80 Q42 80 42 83 L42 89 Q42 96 50 96"/>
+    <path d="M70 64 Q78 64 78 71 L78 77 Q78 80 84 80 Q78 80 78 83 L78 89 Q78 96 70 96"/>
+  </g>
 </svg>

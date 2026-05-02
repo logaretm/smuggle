@@ -6,6 +6,10 @@
 
 <p align="center">Smuggle local npm packages into your projects — no symlinks, no lockfile pollution.</p>
 
+<p align="center">
+  <a href="https://awad.dev/smuggle">Documentation</a>
+</p>
+
 ## Why?
 
 Testing local packages in a real consumer project usually means `npm link`, `pnpm link`, or `file:` references. All of these pollute your lockfile, break with pnpm's content-addressable store, or behave differently from a real install.

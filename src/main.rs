@@ -59,8 +59,8 @@ enum Commands {
 
     /// Remove a registered package
     Unpublish {
-        /// Package name (e.g. @scope/my-pkg)
-        name: String,
+        /// Package name (e.g. @scope/my-pkg). If omitted, prompts for selection.
+        name: Option<String>,
     },
 
     /// Install registered packages into a consumer project
@@ -134,7 +134,7 @@ fn main() {
             cmd_list(ci);
             Ok(())
         }
-        Some(Commands::Unpublish { name }) => cmd_unpublish(&name),
+        Some(Commands::Unpublish { name }) => cmd_unpublish(name.as_deref()),
         Some(Commands::Install {
             path,
             all: inst_all,
@@ -230,8 +230,38 @@ fn cmd_list(ci: bool) {
     let _ = cliclack::outro(format!("{} package(s) registered", packages.len()));
 }
 
-fn cmd_unpublish(name: &str) -> Result<(), String> {
-    store::remove(name)?;
-    let _ = cliclack::log::success(format!("Removed {} from local store", style(name).cyan()));
+fn cmd_unpublish(name: Option<&str>) -> Result<(), String> {
+    let names = match name {
+        Some(n) => vec![n.to_string()],
+        None => {
+            let packages = store::list();
+            if packages.is_empty() {
+                return Err("no packages registered".to_string());
+            }
+
+            let mut prompt = cliclack::multiselect("Select packages to remove");
+            for (i, entry) in packages.iter().enumerate() {
+                let label = format!("{} @ {}", entry.name, entry.version);
+                let hint = entry.source_dir.display().to_string();
+                prompt = prompt.item(i, label, hint);
+            }
+
+            let selections: Vec<usize> = prompt
+                .interact()
+                .map_err(|e| format!("selection cancelled: {e}"))?;
+
+            if selections.is_empty() {
+                return Err("no packages selected".to_string());
+            }
+
+            selections.iter().map(|&i| packages[i].name.clone()).collect()
+        }
+    };
+
+    for name in &names {
+        store::remove(name)?;
+        let _ = cliclack::log::success(format!("Removed {} from local store", style(name).cyan()));
+    }
+
     Ok(())
 }

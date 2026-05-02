@@ -42,6 +42,15 @@ cargo install --path .
 
 ## Usage
 
+| Command | Description |
+|---------|-------------|
+| `smuggle publish` | Pack and register local packages for later use |
+| `smuggle` or `smuggle install` | Swap registered packages into a consumer project and watch for changes |
+| `smuggle add <pkg>` | Add an unreleased package to your dependencies and swap it in |
+| `smuggle dev` | Swap packages and run your dev server |
+| `smuggle list` | List all registered packages |
+| `smuggle unpublish <pkg>` | Remove a registered package |
+
 ### 1. Publish local packages
 
 In your package directory (or workspace root):

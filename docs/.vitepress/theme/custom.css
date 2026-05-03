@@ -306,6 +306,99 @@ kbd {
   border-radius: 4px;
 }
 
+/* Local search */
+.VPLocalSearchBox .shell {
+  border-radius: 14px !important;
+  border: 1px solid rgba(210, 105, 30, 0.25) !important;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 30px 60px -20px rgba(139, 69, 19, 0.45),
+    0 16px 40px -16px rgba(0, 0, 0, 0.4) !important;
+  overflow: hidden;
+  background: var(--vp-c-bg) !important;
+}
+
+.VPLocalSearchBox .search-bar {
+  border-bottom: 1px solid var(--vp-c-divider) !important;
+  background: linear-gradient(180deg, var(--vp-c-bg-soft), transparent);
+  padding: 0.6rem 0.75rem !important;
+}
+
+.VPLocalSearchBox .search-input {
+  font-family: var(--vp-font-family-base) !important;
+  font-size: 1rem !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.005em;
+  border-radius: 8px !important;
+  background: var(--vp-c-bg) !important;
+  border: 1px solid var(--vp-c-divider) !important;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.VPLocalSearchBox .search-input:focus {
+  border-color: var(--sm-rust-2) !important;
+  box-shadow: 0 0 0 3px rgba(210, 105, 30, 0.12);
+}
+
+.VPLocalSearchBox .search-keyboard-shortcuts {
+  background: var(--vp-c-bg-soft) !important;
+  border-top: 1px solid var(--vp-c-divider) !important;
+  padding: 0.55rem 0.85rem !important;
+  font-size: 0.72rem !important;
+  letter-spacing: 0.02em;
+}
+
+.VPLocalSearchBox .search-keyboard-shortcuts kbd {
+  background: var(--vp-c-bg) !important;
+  border-color: var(--vp-c-divider) !important;
+  font-size: 0.72rem !important;
+}
+
+.VPLocalSearchBox .results .result {
+  border-radius: 8px !important;
+  margin: 0.2rem 0.4rem !important;
+  border: 1px solid transparent !important;
+  transition: all 0.15s ease;
+}
+
+.VPLocalSearchBox .results .result.selected {
+  border-color: rgba(210, 105, 30, 0.45) !important;
+  background: linear-gradient(135deg, rgba(210, 105, 30, 0.1), rgba(183, 65, 14, 0.04)) !important;
+  box-shadow: 0 0 0 3px rgba(210, 105, 30, 0.06);
+}
+
+.VPLocalSearchBox .results .result .titles .title-icon {
+  color: var(--sm-rust-2) !important;
+}
+
+.VPLocalSearchBox .results .result .titles .title.main {
+  font-weight: 600 !important;
+  color: var(--vp-c-text-1) !important;
+}
+
+.VPLocalSearchBox mark {
+  background: rgba(210, 105, 30, 0.25) !important;
+  color: var(--vp-c-text-1) !important;
+  padding: 0 2px;
+  border-radius: 2px;
+  font-weight: 600;
+}
+
+.VPLocalSearchBox .no-results {
+  color: var(--vp-c-text-3) !important;
+  font-size: 0.95rem !important;
+}
+
+.VPNavBarSearchButton {
+  border-radius: 8px !important;
+  transition: all 0.2s ease;
+}
+
+.VPNavBarSearchButton:hover {
+  border-color: rgba(210, 105, 30, 0.4) !important;
+  color: var(--vp-c-text-1) !important;
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

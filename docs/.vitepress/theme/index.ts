@@ -9,9 +9,11 @@ import InstallTabs from "../components/InstallTabs.vue";
 import Steps from "../components/Steps.vue";
 import Callout from "../components/Callout.vue";
 import CommandsOverview from "../components/CommandsOverview.vue";
+import NotFound from "../components/NotFound.vue";
 
 export default {
   extends: DefaultTheme,
+  NotFound,
   enhanceApp({ app }) {
     app.component("ProcessDiagram", ProcessDiagram);
     app.component("HeroFeatures", HeroFeatures);

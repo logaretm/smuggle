@@ -41,12 +41,44 @@ function generateLlmsTxt(siteConfig: { outDir: string; srcDir: string }) {
   fs.writeFileSync(path.join(outDir, "llms-full.txt"), full);
 }
 
+const SITE_URL = "https://awad.dev/smuggle";
+const OG_IMAGE = `${SITE_URL}/og.png`;
+const SITE_TITLE = "Smuggle";
+const SITE_DESCRIPTION =
+  "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution";
+
 export default defineConfig({
   base: "/smuggle/",
-  title: "Smuggle",
-  description:
-    "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
+  title: SITE_TITLE,
+  description: SITE_DESCRIPTION,
   head: [
+    ["link", { rel: "icon", type: "image/svg+xml", href: "/smuggle/logo.svg" }],
+    [
+      "link",
+      { rel: "icon", type: "image/png", sizes: "32x32", href: "/smuggle/favicon-32x32.png" },
+    ],
+    [
+      "link",
+      { rel: "icon", type: "image/png", sizes: "16x16", href: "/smuggle/favicon-16x16.png" },
+    ],
+    [
+      "link",
+      { rel: "apple-touch-icon", sizes: "180x180", href: "/smuggle/apple-touch-icon.png" },
+    ],
+    ["link", { rel: "manifest", href: "/smuggle/site.webmanifest" }],
+    ["meta", { name: "theme-color", content: "#b7410e" }],
+    ["meta", { property: "og:type", content: "website" }],
+    ["meta", { property: "og:title", content: SITE_TITLE }],
+    ["meta", { property: "og:description", content: SITE_DESCRIPTION }],
+    ["meta", { property: "og:url", content: SITE_URL }],
+    ["meta", { property: "og:image", content: OG_IMAGE }],
+    ["meta", { property: "og:image:width", content: "1200" }],
+    ["meta", { property: "og:image:height", content: "630" }],
+    ["meta", { property: "og:site_name", content: SITE_TITLE }],
+    ["meta", { name: "twitter:card", content: "summary_large_image" }],
+    ["meta", { name: "twitter:title", content: SITE_TITLE }],
+    ["meta", { name: "twitter:description", content: SITE_DESCRIPTION }],
+    ["meta", { name: "twitter:image", content: OG_IMAGE }],
     ["link", { rel: "preconnect", href: "https://fonts.googleapis.com" }],
     [
       "link",
@@ -88,6 +120,18 @@ export default defineConfig({
   },
   themeConfig: {
     logo: "/logo.svg",
+    search: {
+      provider: "local",
+      options: {
+        miniSearch: {
+          searchOptions: {
+            fuzzy: 0.2,
+            prefix: true,
+            boost: { title: 4, text: 2, titles: 1 },
+          },
+        },
+      },
+    },
     nav: [
       { text: "Guide", link: "/guide/getting-started" },
       { text: "Reference", link: "/reference/commands" },

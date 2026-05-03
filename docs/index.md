@@ -2,7 +2,7 @@
 layout: home
 hero:
   name: Smuggle
-  text: Local npm packages, no hacks needed
+  text: Local npm packages
   tagline: No symlinks, no lockfile pollution, no registry overrides. Just real files in node_modules.
   actions:
     - theme: brand

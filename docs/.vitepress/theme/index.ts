@@ -1,5 +1,6 @@
 import DefaultTheme from "vitepress/theme";
 import "./custom.css";
+import Layout from "../components/Layout.vue";
 import ProcessDiagram from "../components/ProcessDiagram.vue";
 import HeroFeatures from "../components/HeroFeatures.vue";
 import TerminalDemo from "../components/TerminalDemo.vue";
@@ -13,6 +14,7 @@ import NotFound from "../components/NotFound.vue";
 
 export default {
   extends: DefaultTheme,
+  Layout,
   NotFound,
   enhanceApp({ app }) {
     app.component("ProcessDiagram", ProcessDiagram);

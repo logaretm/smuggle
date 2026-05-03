@@ -355,6 +355,16 @@ kbd {
   border-radius: 4px;
 }
 
+/* On doc pages, the sidebar is position: fixed and overlays the left side
+   of the layout. The footer (slotted at layout-bottom) is full-width by
+   default, so the sidebar covers its left half. Offset the footer to start
+   where the content does. */
+@media (min-width: 960px) {
+  .Layout:has(.VPContent.has-sidebar) .sm-footer {
+    padding-left: var(--vp-sidebar-width);
+  }
+}
+
 /* Local search */
 .VPLocalSearchBox .shell {
   border-radius: 14px !important;

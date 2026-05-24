@@ -3,7 +3,7 @@ const ITEMS = [
   { glyph: "links", title: "No symlinks", body: "Packages are real files in node_modules — bundlers, Vite, and Node treat them like any other install." },
   { glyph: "lock", title: "No lockfile changes", body: "pnpm-lock.yaml, package-lock.json, yarn.lock — never touched. Nothing to revert." },
   { glyph: "registry", title: "No .npmrc tweaks", body: "No registry overrides, no scoped resolution rules." },
-  { glyph: "json", title: "No package.json edits", body: "Version ranges are preserved. (smuggle add is the exception — it adds the dep on purpose.)" },
+  { glyph: "json", title: "No package.json edits", body: "Version ranges are preserved. New packages are injected temporarily and reverted on exit." },
   { glyph: "broom", title: "Automatic cleanup", body: "Originals are restored on exit, even on Ctrl-C." },
   { glyph: "hash", title: "Hash-based change detection", body: "Cache busts and Vite restarts only when the packed output actually changes." },
   { glyph: "graph", title: "Workspace aware", body: "Detects pnpm workspaces and scans all member packages for matches." },

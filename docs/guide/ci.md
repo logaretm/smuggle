@@ -1,6 +1,6 @@
 # CI / Non-Interactive Usage
 
-By default, `smuggle install`, `smuggle add`, and `smuggle dev` start a **file watcher that blocks** until you press <kbd>Ctrl</kbd>+<kbd>C</kbd>. They also show **interactive prompts** to select packages.
+By default, `smuggle install` and `smuggle dev` start a **file watcher that blocks** until you press <kbd>Ctrl</kbd>+<kbd>C</kbd>. They also show **interactive prompts** to select packages.
 
 For scripts, CI pipelines, and non-interactive environments (including LLMs / AI agents), you need to disable both behaviors.
 

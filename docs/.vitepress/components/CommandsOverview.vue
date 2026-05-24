@@ -2,7 +2,6 @@
 const COMMANDS = [
   { id: "publish", name: "smuggle publish", blurb: "Pack and register local packages.", blocking: false, anchor: "smuggle-publish" },
   { id: "install", name: "smuggle install", aka: "smuggle", blurb: "Swap registered packages into node_modules.", blocking: true, anchor: "smuggle-install" },
-  { id: "add", name: "smuggle add <pkg>", blurb: "Add an unreleased package and swap it in.", blocking: true, anchor: "smuggle-add" },
   { id: "dev", name: "smuggle dev", blurb: "Swap packages and run your dev server.", blocking: true, anchor: "smuggle-dev" },
   { id: "list", name: "smuggle list", blurb: "List all registered packages.", blocking: false, anchor: "smuggle-list" },
   { id: "unpublish", name: "smuggle unpublish", blurb: "Remove a registered package.", blocking: false, anchor: "smuggle-unpublish" },

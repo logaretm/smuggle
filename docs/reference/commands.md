@@ -22,35 +22,22 @@ Swap registered packages into a consumer project's `node_modules`. Also availabl
 smuggle                          # interactive, with file watcher
 smuggle install --all --once     # non-interactive, no watcher
 smuggle install --ci             # CI mode (--all --once + NDJSON output)
+smuggle @scope/my-pkg            # install a specific package (even if not yet in package.json)
+smuggle @scope/pkg-a @scope/pkg-b --dev  # install as devDependencies
 ```
 
 What it does:
 
-1. Finds registered packages that match the consumer's dependencies
-2. Lets you select which ones to swap (unless `--all`)
-3. Auto-includes transitive dependencies that are also registered
-4. Backs up the originals from `node_modules`
-5. Extracts your local packages into `node_modules`
-6. Clears bundler caches and touches `vite.config.*` to trigger a restart
-7. Watches for changes and re-swaps on change (unless `--once`)
-8. Restores originals on exit
-
-## `smuggle add`
-
-Add unreleased packages to your `package.json` dependencies and swap them in.
-
-```sh
-smuggle add @scope/my-pkg
-smuggle add @scope/pkg-a @scope/pkg-b    # multiple packages
-smuggle add @scope/my-pkg --dev          # as devDependency
-smuggle add @scope/my-pkg --once         # don't start file watcher
-```
-
-<Callout kind="tip" title="When to use add">
-
-`smuggle add` is for packages that haven't been released yet and aren't in your `package.json`. If the package is already a dependency, just run `smuggle` with no subcommand.
-
-</Callout>
+1. If `node_modules` is missing, runs your package manager's install first
+2. Finds registered packages that match the consumer's dependencies (or uses the names you passed)
+3. If any named packages aren't in `package.json`, temporarily injects `file:` references, runs `pm install` to resolve transitive deps, then reverts `package.json` and lockfile on exit
+4. Lets you select which ones to swap (unless `--all`)
+5. Auto-includes transitive dependencies that are also registered
+6. Backs up the originals from `node_modules`
+7. Extracts your local packages into `node_modules`
+8. Clears bundler caches and touches `vite.config.*` to trigger a restart
+9. Watches for changes and re-swaps on change (unless `--once`)
+10. Restores originals on exit
 
 ## `smuggle dev`
 

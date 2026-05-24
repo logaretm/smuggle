@@ -19,20 +19,21 @@ These flags can be passed to any command or to `smuggle` with no subcommand.
 
 ## Command-specific flags
 
+### `smuggle install`
+
+| Flag                | Description                                                            |
+| ------------------- | ---------------------------------------------------------------------- |
+| `--dev`             | Add new packages as devDependencies instead of dependencies            |
+| `--all`             | Skip package selection prompt                                          |
+| `--once`            | Don't start the file watcher after installing                          |
+| `-p, --path <PATH>` | Path to the consumer project                                          |
+
 ### `smuggle publish`
 
 | Flag                | Description                                                            |
 | ------------------- | ---------------------------------------------------------------------- |
 | `--all`             | Publish all non-private workspace packages (skip interactive selection) |
 | `-p, --path <PATH>` | Path to the package directory                                          |
-
-### `smuggle add`
-
-| Flag                | Description                                  |
-| ------------------- | -------------------------------------------- |
-| `--dev`             | Add as a devDependency instead of a dependency |
-| `--once`            | Don't start the file watcher after adding    |
-| `-p, --path <PATH>` | Path to the consumer project                 |
 
 ### `smuggle dev`
 

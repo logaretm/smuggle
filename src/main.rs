@@ -19,11 +19,14 @@ use std::path::PathBuf;
 #[command(
     name = "smuggle",
     about = "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
-    after_help = "By default, install/add/dev start a file watcher that blocks until you press ctrl-c.\nUse --once to swap packages and exit immediately (useful for scripts and non-interactive environments).\nUse --ci for CI pipelines (implies --all --once, emits NDJSON, writes GitHub Actions summary)."
+    after_help = "By default, install/dev start a file watcher that blocks until you press ctrl-c.\nUse --once to swap packages and exit immediately (useful for scripts and non-interactive environments).\nUse --ci for CI pipelines (implies --all --once, emits NDJSON, writes GitHub Actions summary)."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Package name(s) to install (e.g. `smuggle @scope/pkg`)
+    names: Vec<String>,
 
     /// Path to the consumer project (defaults to current directory)
     #[arg(short, long, global = true)]
@@ -70,6 +73,9 @@ enum Commands {
 
     /// Swap registered packages into node_modules (blocks with file watcher unless --once is passed)
     Install {
+        /// Package name(s) to install. If not in package.json, they will be injected temporarily.
+        names: Vec<String>,
+
         /// Path to the consumer project (defaults to current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
@@ -81,24 +87,10 @@ enum Commands {
         /// Swap packages and exit immediately (don't start the file watcher)
         #[arg(long)]
         once: bool,
-    },
 
-    /// Add an unreleased package to your dependencies and swap it in (blocks with file watcher unless --once is passed)
-    Add {
-        /// Package name(s) (must be registered via `smuggle publish`)
-        names: Vec<String>,
-
-        /// Add as a devDependency instead of a dependency
+        /// Add new packages as devDependencies instead of dependencies
         #[arg(long)]
         dev: bool,
-
-        /// Path to the consumer project (defaults to current directory)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Swap packages and exit immediately (don't start the file watcher)
-        #[arg(long)]
-        once: bool,
     },
 
     /// Swap local packages and run your dev server (blocks until ctrl-c)
@@ -144,16 +136,18 @@ fn main() {
             all: unpub_all,
         }) => cmd_unpublish(name.as_deref(), unpub_all || all),
         Some(Commands::Install {
+            names,
             path,
             all: inst_all,
             once: inst_once,
+            dev,
         }) => {
             let consumer_dir = path
                 .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             let all = inst_all || all;
             let once = inst_once || once;
-            install::cmd_install(&consumer_dir, all, once, ci, &mut summary)
+            install::cmd_install(&consumer_dir, all, once, ci, dev, &names, &mut summary)
         }
         Some(Commands::Dev {
             path,
@@ -171,22 +165,10 @@ fn main() {
             }
             Ok(())
         }
-        Some(Commands::Add {
-            names,
-            dev,
-            path,
-            once: add_once,
-        }) => {
-            let consumer_dir = path
-                .or(cli.path)
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
-            let once = add_once || once;
-            install::cmd_add(&consumer_dir, &names, dev, once)
-        }
         None => {
-            // bare `smuggle` = `smuggle install`
+            // bare `smuggle` or `smuggle <names>` = `smuggle install`
             let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            install::cmd_install(&consumer_dir, all, once, ci, &mut summary)
+            install::cmd_install(&consumer_dir, all, once, ci, false, &cli.names, &mut summary)
         }
     };
 
@@ -209,7 +191,6 @@ fn cmd_list(ci: bool) {
     let packages = store::list();
 
     if ci {
-        // Output as a JSON array
         if let Ok(out) = serde_json::to_string(&packages) {
             println!("{out}");
         }

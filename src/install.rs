@@ -4,239 +4,23 @@ use std::time::Instant;
 
 use crate::{backup, ci, pack, pm, store, watch, workspace};
 
-pub fn cmd_add(consumer_dir: &Path, names: &[String], dev: bool, once: bool) -> Result<(), String> {
-    if names.is_empty() {
-        return Err("please specify at least one package name".into());
-    }
-
-    let consumer_dir = consumer_dir
-        .canonicalize()
-        .map_err(|e| format!("invalid path: {e}"))?;
-
-    let pkg_json_path = consumer_dir.join("package.json");
-    if !pkg_json_path.exists() {
-        return Err("no package.json found in consumer directory".into());
-    }
-
-    let _ = cliclack::intro(style(" smuggle add ").on_cyan().black());
-
-    let registered = store::list();
-
-    let consumer_pkg: pack::ConsumerPackageJson =
-        serde_json::from_str(&std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("failed to parse consumer package.json: {e}"))?;
-
-    let mut entries: Vec<&store::StoreEntry> = Vec::with_capacity(names.len());
-    let mut new_names: Vec<&String> = Vec::new();
-    for name in names {
-        let entry = registered.iter().find(|e| e.name == *name).ok_or_else(|| {
-            format!(
-                "{} is not registered. Run {} in the package directory first.",
-                style(name).cyan(),
-                style("smuggle publish").cyan(),
-            )
-        })?;
-
-        let tarball_path = store::tarball_path(name);
-        if !tarball_path.exists() {
-            return Err(format!(
-                "tarball for {} is missing from the store — try `smuggle publish` again",
-                style(name).cyan(),
-            ));
-        }
-
-        if !consumer_pkg.all_dependency_names().contains(&entry.name) {
-            new_names.push(name);
-        }
-
-        entries.push(entry);
-    }
-
-    let dep_key = if dev {
-        "devDependencies"
-    } else {
-        "dependencies"
-    };
-
-    let original_pkg_json = std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?;
-    let mut pkg_value: serde_json::Value =
-        serde_json::from_str(&original_pkg_json).map_err(|e| e.to_string())?;
-
-    if pkg_value.get(dep_key).is_none() {
-        pkg_value[dep_key] = serde_json::json!({});
-    }
-
-    for name in &new_names {
-        let tarball_path = store::tarball_path(name);
-        let version_spec = format!("file:{}", tarball_path.display());
-        pkg_value[dep_key][name] = serde_json::Value::String(version_spec.clone());
-
-        cliclack::log::info(format!(
-            "Added {} to {} as {}",
-            style(name).cyan(),
-            style(dep_key).dim(),
-            style(&version_spec).dim(),
-        ))
-        .map_err(|e| e.to_string())?;
-    }
-
-    let detected_pm = pm::detect_package_manager(&consumer_dir);
-    let lockfile_snapshots: Vec<backup::FileSnapshot> =
-        pm::lockfile_candidates(&consumer_dir, detected_pm)
-            .into_iter()
-            .map(backup::FileSnapshot::capture)
-            .collect();
-
-    if !new_names.is_empty() {
-        let new_pkg_json = serde_json::to_string_pretty(&pkg_value).map_err(|e| e.to_string())?;
-        std::fs::write(&pkg_json_path, format!("{new_pkg_json}\n")).map_err(|e| e.to_string())?;
-
-        let new_display = new_names
-            .iter()
-            .map(|n| style(n).cyan().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let install_spinner = cliclack::spinner();
-        install_spinner.start(format!(
-            "Running `{} install` to resolve dependencies for {}...",
-            detected_pm, new_display,
-        ));
-        if let Err(e) = pm::run_install(&consumer_dir) {
-            install_spinner.stop(format!("{} install failed: {e}", style("✗").red()));
-            let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
-            for snap in &lockfile_snapshots {
-                snap.restore();
-            }
-            return Err(format!("install aborted: {e}"));
-        }
-        install_spinner.stop(format!(
-            "Installed transitive dependencies for {}",
-            new_display,
-        ));
-    }
-
-    let nm_dir = consumer_dir.join("node_modules");
-    std::fs::create_dir_all(&nm_dir).map_err(|e| format!("failed to create node_modules: {e}"))?;
-
-    let expanded = expand_with_registered_deps(&entries, &registered);
-    let all_refs: Vec<&store::StoreEntry> = expanded.iter().collect();
-
-    let extra: Vec<&str> = all_refs
-        .iter()
-        .filter(|e| !names.iter().any(|n| **n == e.name))
-        .map(|e| e.name.as_str())
-        .collect();
-    if !extra.is_empty() {
-        let _ = cliclack::log::info(format!(
-            "Also overlaying {} registered transitive dep(s): {}",
-            extra.len(),
-            extra
-                .iter()
-                .map(|n| style(n).cyan().to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
-    }
-
-    for name in names {
-        let target_dir = nm_dir.join(name);
-        std::fs::create_dir_all(&target_dir)
-            .map_err(|e| format!("failed to create {}: {e}", target_dir.display()))?;
-    }
-    let added_dirs: Vec<PathBuf> = new_names.iter().map(|n| nm_dir.join(n)).collect();
-
-    let mut summary = ci::SummaryCollector::new();
-    let targets = resolve_targets(&all_refs, &consumer_dir, &[], false, &mut summary)?;
-    if targets.is_empty() {
-        return Err("no smuggled packages ended up in node_modules after install".into());
-    }
-
-    let extract_spinner = cliclack::spinner();
-    extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
-    if let Err(e) = extract_all(&targets) {
-        extract_spinner.stop(format!("{} extraction failed: {e}", style("✗").red()));
-        let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
-        for snap in &lockfile_snapshots {
-            snap.restore();
-        }
-        return Err(format!("add aborted: {e}"));
-    }
-    extract_spinner.stop(format!(
-        "Smuggled {} package(s) into node_modules",
-        style(targets.len()).green()
-    ));
-
-    if once {
-        let _ = cliclack::outro(
-            "Done (package.json and lockfile were modified — remember to revert if needed)",
-        );
-        return Ok(());
-    }
-
-    backup::setup_ctrlc_add_cleanup(
-        added_dirs.clone(),
-        pkg_json_path.clone(),
-        original_pkg_json.clone(),
-        lockfile_snapshots.clone(),
-    );
-
-    pm::clear_bundler_caches(&consumer_dir, &[]);
-    pm::touch_vite_configs(&consumer_dir, &[]);
-
-    cliclack::log::success(format!(
-        "Watching for changes... {}",
-        style("(ctrl-c to stop and revert)").dim()
-    ))
-    .map_err(|e| e.to_string())?;
-
-    watch::watch_and_reinstall(
-        &all_refs,
-        &targets,
-        &mut watch::PostSwapAction::ClearCachesAndTouch {
-            consumer_dir: &consumer_dir,
-            workspace_pkg_dirs: &[],
-        },
-    )?;
-
-    let restore_spinner = cliclack::spinner();
-    restore_spinner.start("Reverting package.json, lockfile, and removing added packages...");
-
-    for target_dir in &added_dirs {
-        let _ = std::fs::remove_dir_all(target_dir);
-        if let Some(parent) = target_dir.parent() {
-            let _ = std::fs::remove_dir(parent);
-        }
-    }
-    std::fs::write(&pkg_json_path, &original_pkg_json).map_err(|e| e.to_string())?;
-    for snap in &lockfile_snapshots {
-        snap.restore();
-    }
-
-    restore_spinner.stop("Reverted package.json, lockfile, and removed added packages");
-
-    let _ = cliclack::outro("Done");
-
-    Ok(())
-}
-
 pub fn cmd_install(
     consumer_dir: &Path,
     select_all: bool,
     once: bool,
     ci: bool,
+    dev: bool,
+    names: &[String],
     summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
-    // In CI, always select all packages
     let select_all = select_all || ci::is_ci();
 
-    // Detect workspace (pnpm or yarn)
     if let Some(ws) = workspace::detect_workspace(&consumer_dir) {
-        return cmd_install_workspace(&consumer_dir, ws, select_all, once, ci, summary);
+        return cmd_install_workspace(&consumer_dir, ws, select_all, once, ci, dev, names, summary);
     }
 
     let pkg_json_path = consumer_dir.join("package.json");
@@ -253,8 +37,48 @@ pub fn cmd_install(
             .map_err(|e| format!("failed to parse consumer package.json: {e}"))?;
 
     let all_deps = consumer_pkg.all_dependency_names();
-
     let registered = store::list();
+
+    if !names.is_empty() {
+        let mut entries: Vec<&store::StoreEntry> = Vec::with_capacity(names.len());
+        for name in names {
+            let entry = registered.iter().find(|e| e.name == *name).ok_or_else(|| {
+                format!(
+                    "{} is not registered. Run {} in the package directory first.",
+                    style(name).cyan(),
+                    style("smuggle publish").cyan(),
+                )
+            })?;
+
+            let tarball_path = store::tarball_path(name);
+            if !tarball_path.exists() {
+                return Err(format!(
+                    "tarball for {} is missing from the store — try `smuggle publish` again",
+                    style(name).cyan(),
+                ));
+            }
+
+            entries.push(entry);
+        }
+
+        let new_names: Vec<&str> = names
+            .iter()
+            .filter(|n| !all_deps.contains(&**n))
+            .map(|n| n.as_str())
+            .collect();
+
+        return run_install_flow(
+            &consumer_dir,
+            &entries,
+            &[],
+            once,
+            ci,
+            dev,
+            &new_names,
+            summary,
+        );
+    }
+
     let mut matches: Vec<&store::StoreEntry> = registered
         .iter()
         .filter(|entry| all_deps.contains(&entry.name))
@@ -316,15 +140,18 @@ pub fn cmd_install(
         selections.iter().map(|&i| matches[i]).collect()
     };
 
-    run_install_flow(&consumer_dir, &selected, &[], once, ci, summary)
+    run_install_flow(&consumer_dir, &selected, &[], once, ci, dev, &[], summary)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_install_workspace(
     root: &Path,
     ws: workspace::DetectedWorkspace,
     select_all: bool,
     once: bool,
     ci: bool,
+    dev: bool,
+    names: &[String],
     summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
     if !ci {
@@ -340,7 +167,54 @@ fn cmd_install_workspace(
         return Err("no registered packages. publish some first with `smuggle publish`.".into());
     }
 
-    // Collect deps from all workspace packages and track which workspace pkg uses which proxied dep
+    if !names.is_empty() {
+        let mut entries: Vec<&store::StoreEntry> = Vec::with_capacity(names.len());
+        for name in names {
+            let entry = registered.iter().find(|e| e.name == *name).ok_or_else(|| {
+                format!(
+                    "{} is not registered. Run {} in the package directory first.",
+                    style(name).cyan(),
+                    style("smuggle publish").cyan(),
+                )
+            })?;
+
+            let tarball_path = store::tarball_path(name);
+            if !tarball_path.exists() {
+                return Err(format!(
+                    "tarball for {} is missing from the store — try `smuggle publish` again",
+                    style(name).cyan(),
+                ));
+            }
+
+            entries.push(entry);
+        }
+
+        let mut all_deps = std::collections::HashSet::new();
+        for wp in &workspace_packages {
+            let pkg_json_path = wp.path.join("package.json");
+            let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
+                continue;
+            };
+            let Ok(consumer_pkg) = serde_json::from_str::<pack::ConsumerPackageJson>(&raw) else {
+                continue;
+            };
+            all_deps.extend(consumer_pkg.all_dependency_names());
+        }
+
+        let new_names: Vec<&str> = names
+            .iter()
+            .filter(|n| !all_deps.contains(&**n))
+            .map(|n| n.as_str())
+            .collect();
+
+        let ws_dirs: Vec<PathBuf> = workspace_packages
+            .iter()
+            .map(|wp| wp.path.clone())
+            .collect();
+
+        return run_install_flow(root, &entries, &ws_dirs, once, ci, dev, &new_names, summary);
+    }
+
     let mut all_deps = std::collections::HashSet::new();
     let mut workspace_dep_map: Vec<(String, Vec<String>)> = Vec::new();
 
@@ -379,7 +253,6 @@ fn cmd_install_workspace(
 
     matches.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // Show which workspace packages use which proxied deps
     let selected: Vec<&store::StoreEntry> = if select_all {
         if !ci {
             let mut lines = Vec::new();
@@ -428,20 +301,175 @@ fn cmd_install_workspace(
         .iter()
         .map(|wp| wp.path.clone())
         .collect();
-    run_install_flow(root, &selected, &ws_dirs, once, ci, summary)
+    run_install_flow(root, &selected, &ws_dirs, once, ci, dev, &[], summary)
+}
+
+struct AddCleanupState {
+    added_dirs: Vec<PathBuf>,
+    pkg_json_path: PathBuf,
+    original_pkg_json: String,
+    lockfile_snapshots: Vec<backup::FileSnapshot>,
+}
+
+impl AddCleanupState {
+    fn revert(&self) {
+        for dir in &self.added_dirs {
+            let _ = std::fs::remove_dir_all(dir);
+            if let Some(parent) = dir.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+        let _ = std::fs::write(&self.pkg_json_path, &self.original_pkg_json);
+        for snap in &self.lockfile_snapshots {
+            snap.restore();
+        }
+    }
+}
+
+fn inject_and_install_new_packages(
+    install_dir: &Path,
+    new_names: &[&str],
+    dev: bool,
+    ci: bool,
+) -> Result<Option<AddCleanupState>, String> {
+    if new_names.is_empty() {
+        return Ok(None);
+    }
+
+    let pkg_json_path = install_dir.join("package.json");
+    let original_pkg_json = std::fs::read_to_string(&pkg_json_path).map_err(|e| e.to_string())?;
+    let mut pkg_value: serde_json::Value =
+        serde_json::from_str(&original_pkg_json).map_err(|e| e.to_string())?;
+
+    let dep_key = if dev {
+        "devDependencies"
+    } else {
+        "dependencies"
+    };
+
+    if pkg_value.get(dep_key).is_none() {
+        pkg_value[dep_key] = serde_json::json!({});
+    }
+
+    for name in new_names {
+        let tarball_path = store::tarball_path(name);
+        let version_spec = format!("file:{}", tarball_path.display());
+        pkg_value[dep_key][name] = serde_json::Value::String(version_spec.clone());
+
+        if !ci {
+            let _ = cliclack::log::info(format!(
+                "Adding {} to {} as {}",
+                style(name).cyan(),
+                style(dep_key).dim(),
+                style(&version_spec).dim(),
+            ));
+        }
+    }
+
+    let detected_pm = pm::detect_package_manager(install_dir);
+    let lockfile_snapshots: Vec<backup::FileSnapshot> =
+        pm::lockfile_candidates(install_dir, detected_pm)
+            .into_iter()
+            .map(backup::FileSnapshot::capture)
+            .collect();
+
+    let new_pkg_json = serde_json::to_string_pretty(&pkg_value).map_err(|e| e.to_string())?;
+    std::fs::write(&pkg_json_path, format!("{new_pkg_json}\n")).map_err(|e| e.to_string())?;
+
+    let new_display = new_names
+        .iter()
+        .map(|n| style(n).cyan().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if !ci {
+        let install_spinner = cliclack::spinner();
+        install_spinner.start(format!(
+            "Running `{} install` to resolve dependencies for {}...",
+            detected_pm, new_display,
+        ));
+        if let Err(e) = pm::run_install(install_dir) {
+            install_spinner.stop(format!("{} install failed: {e}", style("✗").red()));
+            let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
+            for snap in &lockfile_snapshots {
+                snap.restore();
+            }
+            return Err(format!("install aborted: {e}"));
+        }
+        install_spinner.stop(format!(
+            "Installed transitive dependencies for {}",
+            new_display,
+        ));
+    } else {
+        if let Err(e) = pm::run_install(install_dir) {
+            let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
+            for snap in &lockfile_snapshots {
+                snap.restore();
+            }
+            return Err(format!("install aborted: {e}"));
+        }
+    }
+
+    let nm_dir = install_dir.join("node_modules");
+    let added_dirs: Vec<PathBuf> = new_names
+        .iter()
+        .map(|n| {
+            let target_dir = nm_dir.join(n);
+            let _ = std::fs::create_dir_all(&target_dir);
+            target_dir
+        })
+        .collect();
+
+    Ok(Some(AddCleanupState {
+        added_dirs,
+        pkg_json_path,
+        original_pkg_json,
+        lockfile_snapshots,
+    }))
+}
+
+fn ensure_deps_installed(install_dir: &Path, ci: bool) -> Result<(), String> {
+    let nm_dir = install_dir.join("node_modules");
+    if nm_dir.exists() && std::fs::read_dir(&nm_dir).map(|mut d| d.next().is_some()).unwrap_or(false) {
+        return Ok(());
+    }
+
+    let detected_pm = pm::detect_package_manager(install_dir);
+
+    if !ci {
+        let install_spinner = cliclack::spinner();
+        install_spinner.start(format!(
+            "No node_modules found — running `{} install`...",
+            detected_pm,
+        ));
+        if let Err(e) = pm::run_install(install_dir) {
+            install_spinner.stop(format!("{} install failed: {e}", style("✗").red()));
+            return Err(format!("install aborted: {e}"));
+        }
+        install_spinner.stop(format!("Installed dependencies with {}", detected_pm));
+    } else {
+        pm::run_install(install_dir)?;
+    }
+
+    Ok(())
 }
 
 /// Shared install flow: expand deps, overwrite in node_modules, watch for changes.
-/// No registry, no .npmrc, no lockfile changes — just direct file replacement.
+#[allow(clippy::too_many_arguments)]
 fn run_install_flow(
     install_dir: &Path,
     selected: &[&store::StoreEntry],
     workspace_pkg_dirs: &[PathBuf],
     once: bool,
     ci: bool,
+    dev: bool,
+    new_names: &[&str],
     summary: &mut ci::SummaryCollector,
 ) -> Result<(), String> {
-    // Expand: include registered transitive dependencies
+    ensure_deps_installed(install_dir, ci)?;
+
+    let add_cleanup = inject_and_install_new_packages(install_dir, new_names, dev, ci)?;
+
     let registered = store::list();
     let all_entries = expand_with_registered_deps(selected, &registered);
     let all_refs: Vec<&store::StoreEntry> = all_entries.iter().collect();
@@ -464,21 +492,21 @@ fn run_install_flow(
         .map_err(|e| e.to_string())?;
     }
 
-    // Resolve each package's location in node_modules
     let targets = resolve_targets(&all_refs, install_dir, workspace_pkg_dirs, ci, summary)?;
 
     if targets.is_empty() {
+        if let Some(ref cleanup) = add_cleanup {
+            cleanup.revert();
+        }
         return Err("none of the selected packages are installed in node_modules".into());
     }
 
     if once {
         if ci {
-            // JSON one-shot mode: emit per-package events with timing
             let mut installed = 0;
             let mut failed = 0;
             for target in &targets {
                 let start = Instant::now();
-                // Look up version for summary
                 let version = all_entries
                     .iter()
                     .find(|e| e.name == target.name)
@@ -521,11 +549,13 @@ fn run_install_flow(
                 failed,
                 duration_ms: Some(ci::elapsed_ms(summary.start)),
             });
+            if let Some(ref cleanup) = add_cleanup {
+                cleanup.revert();
+            }
             if failed > 0 {
                 return Err(format!("{failed} package(s) failed to install"));
             }
         } else {
-            // One-shot mode: swap and exit, no backup/restore, no cache clearing, no watch
             let extract_spinner = cliclack::spinner();
             extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
 
@@ -538,6 +568,11 @@ fn run_install_flow(
                 "Smuggled {} package(s) into node_modules",
                 style(targets.len()).green()
             ));
+
+            if let Some(ref cleanup) = add_cleanup {
+                cleanup.revert();
+                let _ = cliclack::log::remark("Reverted package.json and lockfile");
+            }
 
             let _ = cliclack::outro("Done");
         }
@@ -564,9 +599,18 @@ fn run_install_flow(
             (backup_base.join(&backup_name), t.target_dir.clone())
         })
         .collect();
-    backup::setup_ctrlc_restore(backup_base.clone(), cleanup_targets);
+    backup::setup_ctrlc_combined_cleanup(
+        backup_base.clone(),
+        cleanup_targets,
+        add_cleanup.as_ref().map(|c| backup::AddCleanupInfo {
+            added_dirs: c.added_dirs.clone(),
+            pkg_json_path: c.pkg_json_path.clone(),
+            original_pkg_json: c.original_pkg_json.clone(),
+            lockfile_snapshots: c.lockfile_snapshots.clone(),
+        }),
+    );
 
-    // Extract tarballs into node_modules (transactional: rollback all on failure)
+    // Extract tarballs into node_modules
     let extract_spinner = cliclack::spinner();
     extract_spinner.start(format!("Smuggling {} package(s)...", targets.len()));
 
@@ -576,6 +620,9 @@ fn run_install_flow(
         restore_spinner.start("Rolling back all packages...");
         backup::restore_all(&backup_base, &backup_pairs);
         restore_spinner.stop("Rolled back all packages to originals");
+        if let Some(ref cleanup) = add_cleanup {
+            cleanup.revert();
+        }
         return Err(format!("install aborted: {e}"));
     }
 
@@ -584,7 +631,6 @@ fn run_install_flow(
         style(targets.len()).green()
     ));
 
-    // Clear bundler caches and trigger vite restart
     let extra: Vec<&Path> = workspace_pkg_dirs.iter().map(|p| p.as_path()).collect();
     pm::clear_bundler_caches(install_dir, &extra);
     pm::touch_vite_configs(install_dir, workspace_pkg_dirs);
@@ -595,7 +641,6 @@ fn run_install_flow(
     ))
     .map_err(|e| e.to_string())?;
 
-    // Watch for changes
     watch::watch_and_reinstall(
         &all_refs,
         &targets,
@@ -605,11 +650,23 @@ fn run_install_flow(
         },
     )?;
 
-    // Cleanup on normal exit — restore originals
+    // Cleanup on normal exit
     let restore_spinner = cliclack::spinner();
-    restore_spinner.start("Restoring originals...");
+    if add_cleanup.is_some() {
+        restore_spinner
+            .start("Restoring originals and reverting package.json/lockfile...");
+    } else {
+        restore_spinner.start("Restoring originals...");
+    }
     backup::restore_all(&backup_base, &backup_pairs);
-    restore_spinner.stop("Restored originals");
+    if let Some(ref cleanup) = add_cleanup {
+        cleanup.revert();
+    }
+    if add_cleanup.is_some() {
+        restore_spinner.stop("Restored originals and reverted package.json/lockfile");
+    } else {
+        restore_spinner.stop("Restored originals");
+    }
 
     let _ = cliclack::outro("Done");
 
@@ -676,25 +733,18 @@ pub fn resolve_targets(
     Ok(targets)
 }
 
-/// Find all locations of a package inside a node_modules directory, checking:
-/// 1. Direct: `node_modules/{name}` (works for direct deps in all package managers)
-/// 2. pnpm virtual store: `node_modules/.pnpm/{encoded}@*/node_modules/{name}`
-///    (collects all matches — multiple versions or peer-dep contexts may exist)
-/// 3. Nested: `node_modules/{parent}/node_modules/{name}` (npm non-hoisted deps)
+/// Find all locations of a package inside a node_modules directory.
 fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Vec<PathBuf> {
     let mut results = Vec::new();
 
-    // 1. Direct lookup
     let direct = nm_dir.join(name);
     if direct.exists() {
         results.push(direct);
         return results;
     }
 
-    // 2. pnpm virtual store — collect all matching versions/peer-dep contexts
     let pnpm_dir = nm_dir.join(".pnpm");
     if pnpm_dir.exists() {
-        // pnpm encodes scoped packages: @scope/name → @scope+name
         let encoded_prefix = name.replace('/', "+");
         if let Ok(entries) = std::fs::read_dir(&pnpm_dir) {
             for entry in entries.flatten() {
@@ -713,19 +763,16 @@ fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Vec<PathBuf> {
         }
     }
 
-    // 3. Nested node_modules (npm non-hoisted transitive deps)
     if let Ok(entries) = std::fs::read_dir(nm_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let entry_name = entry.file_name();
             let entry_str = entry_name.to_string_lossy();
 
-            // Skip hidden dirs (.pnpm, .cache, etc.)
             if entry_str.starts_with('.') {
                 continue;
             }
 
-            // Handle scoped packages: check inside @scope/ dirs
             if entry_str.starts_with('@') && path.is_dir() {
                 if let Ok(scope_entries) = std::fs::read_dir(&path) {
                     for scope_entry in scope_entries.flatten() {
@@ -750,7 +797,7 @@ fn find_package_in_node_modules(name: &str, nm_dir: &Path) -> Vec<PathBuf> {
     results
 }
 
-/// Extract all tarballs into their targets. Returns an error on the first failure.
+/// Extract all tarballs into their targets.
 fn extract_all(targets: &[watch::OverrideTarget]) -> Result<(), String> {
     for target in targets {
         let tarball = store::load_tarball(&target.name)?;
@@ -771,7 +818,6 @@ pub fn expand_with_registered_deps(
     let mut included: std::collections::HashSet<String> =
         selected.iter().map(|e| e.name.clone()).collect();
 
-    // BFS to find transitive registered deps
     let mut queue: Vec<String> = included.iter().cloned().collect();
     while let Some(name) = queue.pop() {
         let Some(entry) = registered.iter().find(|e| e.name == name) else {

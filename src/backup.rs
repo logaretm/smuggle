@@ -85,21 +85,9 @@ pub fn restore_all(backup_base: &Path, targets: &[(String, PathBuf)]) {
     let _ = std::fs::remove_dir_all(backup_base);
 }
 
-/// Set up a ctrl-c handler that restores all backups on interrupt.
-pub fn setup_ctrlc_restore(backup_base: PathBuf, targets: Vec<(PathBuf, PathBuf)>) {
-    let _ = ctrlc::set_handler(move || {
-        for (backup, target) in &targets {
-            let _ = restore_dir(backup, target);
-        }
-        let _ = std::fs::remove_dir_all(&backup_base);
-        eprintln!("\n  Restored originals");
-        std::process::exit(0);
-    });
-}
-
 /// Snapshot a file's current contents (or record its absence) so it can be
 /// restored later. Used for lockfiles that a package manager is about to
-/// rewrite during `smuggle add`.
+/// rewrite.
 #[derive(Clone)]
 pub struct FileSnapshot {
     pub path: PathBuf,
@@ -124,28 +112,41 @@ impl FileSnapshot {
     }
 }
 
-/// Set up a ctrl-c handler for "added" packages: remove injected dirs,
-/// restore package.json, and restore any lockfile snapshots taken before
-/// the package manager ran.
-pub fn setup_ctrlc_add_cleanup(
-    added_dirs: Vec<PathBuf>,
-    pkg_json_path: PathBuf,
-    original_pkg_json: String,
-    lockfile_snapshots: Vec<FileSnapshot>,
+pub struct AddCleanupInfo {
+    pub added_dirs: Vec<PathBuf>,
+    pub pkg_json_path: PathBuf,
+    pub original_pkg_json: String,
+    pub lockfile_snapshots: Vec<FileSnapshot>,
+}
+
+/// Set up a ctrl-c handler that restores node_modules backups and optionally
+/// reverts injected package.json/lockfile changes for new packages.
+pub fn setup_ctrlc_combined_cleanup(
+    backup_base: PathBuf,
+    targets: Vec<(PathBuf, PathBuf)>,
+    add_cleanup: Option<AddCleanupInfo>,
 ) {
     let _ = ctrlc::set_handler(move || {
-        for dir in &added_dirs {
-            let _ = std::fs::remove_dir_all(dir);
-            // Clean up empty scope directory (e.g. node_modules/@scope/)
-            if let Some(parent) = dir.parent() {
-                let _ = std::fs::remove_dir(parent); // only succeeds if empty
+        for (backup, target) in &targets {
+            let _ = restore_dir(backup, target);
+        }
+        let _ = std::fs::remove_dir_all(&backup_base);
+
+        if let Some(ref cleanup) = add_cleanup {
+            for dir in &cleanup.added_dirs {
+                let _ = std::fs::remove_dir_all(dir);
+                if let Some(parent) = dir.parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
             }
+            let _ = std::fs::write(&cleanup.pkg_json_path, &cleanup.original_pkg_json);
+            for snap in &cleanup.lockfile_snapshots {
+                snap.restore();
+            }
+            eprintln!("\n  Restored originals and reverted package.json/lockfile");
+        } else {
+            eprintln!("\n  Restored originals");
         }
-        let _ = std::fs::write(&pkg_json_path, &original_pkg_json);
-        for snap in &lockfile_snapshots {
-            snap.restore();
-        }
-        eprintln!("\n  Reverted package.json, lockfile, and removed added packages");
         std::process::exit(0);
     });
 }

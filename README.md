@@ -54,7 +54,7 @@ cargo install --path .
 |---------|-------------|
 | `smuggle publish` | Pack and register local packages for later use |
 | `smuggle` or `smuggle install` | Swap registered packages into a consumer project and watch for changes |
-| `smuggle add <pkg>` | Add an unreleased package to your dependencies and swap it in |
+| `smuggle @scope/pkg` | Install a specific package (even if not yet in `package.json`) |
 | `smuggle dev` | Swap packages and run your dev server |
 | `smuggle list` | List all registered packages |
 | `smuggle unpublish <pkg>` | Remove a registered package |
@@ -91,26 +91,23 @@ smuggle
 
 This will:
 
-1. Find registered packages that match the consumer's dependencies
-2. Let you select which ones to proxy
-3. Auto-include transitive dependencies that are also registered
-4. Back up the originals from `node_modules`
-5. Extract your local packages directly into `node_modules`
-6. Clear bundler caches (Vite, Next.js, webpack) and touch `vite.config.*` to trigger a restart
-7. Watch for changes in the source packages — on change, re-pack and re-extract instantly
-8. Restore everything on exit (ctrl-c)
+1. Run your package manager's install if `node_modules` is missing
+2. Find registered packages that match the consumer's dependencies
+3. Let you select which ones to proxy
+4. Auto-include transitive dependencies that are also registered
+5. Back up the originals from `node_modules`
+6. Extract your local packages directly into `node_modules`
+7. Clear bundler caches (Vite, Next.js, webpack) and touch `vite.config.*` to trigger a restart
+8. Watch for changes in the source packages — on change, re-pack and re-extract instantly
+9. Restore everything on exit (ctrl-c)
 
-### `smuggle add`
+You can also pass package names directly. If they're not yet in your `package.json`, smuggle will temporarily inject them, run your package manager to resolve transitive dependencies, then revert `package.json` and the lockfile on exit:
 
 ```sh
-smuggle add @scope/my-pkg
-# or multiple at once
-smuggle add @scope/pkg-a @scope/pkg-b
+smuggle @scope/my-pkg
+smuggle @scope/pkg-a @scope/pkg-b
+smuggle @scope/my-pkg --dev     # inject as devDependency
 ```
-
-This adds the package(s) to your `package.json` dependencies (resolving transitive deps via your package manager), then swaps them with the local versions. Use `--dev` to add as devDependencies instead.
-
-> **Note:** `smuggle add` is mainly useful for packages that haven't been released yet and aren't in your `package.json`. If the package is already a dependency, just run `smuggle` with no subcommand.
 
 ### `smuggle dev`
 
@@ -155,7 +152,7 @@ These flags can be passed to any command (or to `smuggle` with no subcommand):
 
 | Command | Flag | Description |
 |---------|------|-------------|
-| `add` | `--dev` | Add as a devDependency instead of a dependency |
+| `install` | `--dev` | Add new packages as devDependencies instead of dependencies |
 | `dev` | `--restart` | Kill and restart the dev server on each package change (instead of relying on HMR) |
 
 ## How it works
@@ -188,7 +185,7 @@ Key design decisions:
 - **No symlinks** — packages are real files in `node_modules`, just like a normal install
 - **No lockfile changes** — your `pnpm-lock.yaml` / `package-lock.json` / `yarn.lock` stays untouched
 - **No `.npmrc` changes** — no registry overrides needed
-- **No `package.json` changes** — version ranges are preserved (`smuggle install`; `smuggle add` does modify `package.json` to add the dependency)
+- **No `package.json` changes** — version ranges are preserved (new packages are injected temporarily and reverted on exit)
 - **Automatic cleanup** — originals are restored on exit, even on ctrl-c
 - **Hash-based change detection** — only triggers cache busting and Vite restarts when the packed output actually changes
 - **Workspace support** — detects pnpm workspaces and scans all member packages for matching dependencies

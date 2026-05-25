@@ -168,7 +168,15 @@ fn main() {
         None => {
             // bare `smuggle` or `smuggle <names>` = `smuggle install`
             let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            install::cmd_install(&consumer_dir, all, once, ci, false, &cli.names, &mut summary)
+            install::cmd_install(
+                &consumer_dir,
+                all,
+                once,
+                ci,
+                false,
+                &cli.names,
+                &mut summary,
+            )
         }
     };
 

@@ -430,7 +430,11 @@ fn inject_and_install_new_packages(
 
 fn ensure_deps_installed(install_dir: &Path, ci: bool) -> Result<(), String> {
     let nm_dir = install_dir.join("node_modules");
-    if nm_dir.exists() && std::fs::read_dir(&nm_dir).map(|mut d| d.next().is_some()).unwrap_or(false) {
+    if nm_dir.exists()
+        && std::fs::read_dir(&nm_dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+    {
         return Ok(());
     }
 
@@ -653,8 +657,7 @@ fn run_install_flow(
     // Cleanup on normal exit
     let restore_spinner = cliclack::spinner();
     if add_cleanup.is_some() {
-        restore_spinner
-            .start("Restoring originals and reverting package.json/lockfile...");
+        restore_spinner.start("Restoring originals and reverting package.json/lockfile...");
     } else {
         restore_spinner.start("Restoring originals...");
     }

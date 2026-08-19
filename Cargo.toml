@@ -19,7 +19,7 @@ filetime = "0.2"
 flate2 = "1"
 tar = "0.4"
 ctrlc = "3"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "signal"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "macros", "signal", "io-std", "io-util"] }
 hyper = { version = "1.11.0", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio", "client-legacy"] }
 http-body-util = "0.1.5"
@@ -33,6 +33,9 @@ webpki-roots = "1.0.9"
 time = { version = "0.3.55", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["http1", "ring", "webpki-tokio", "tls12"] }
 tower-service = "0.3.3"
+sha2 = "0.11.0"
+sha1 = "0.11.0"
+base64 = "0.23.1"
 
 [dev-dependencies]
 assert_cmd = "2"

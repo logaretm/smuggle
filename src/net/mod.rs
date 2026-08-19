@@ -1,4 +1,5 @@
 pub mod ca;
+pub mod hijack;
 pub mod hosts;
 pub mod loopback;
 pub mod proxy;

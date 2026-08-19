@@ -1,12 +1,12 @@
 #![allow(clippy::collapsible_if)]
 
-mod backup;
 mod ci;
 mod dev;
 mod install;
 mod net;
 mod pack;
 mod pm;
+mod proxy_session;
 mod publish;
 mod setup;
 mod store;
@@ -42,11 +42,7 @@ struct Cli {
     #[arg(long, global = true)]
     all: bool,
 
-    /// Swap packages once and exit immediately (without starting the file watcher)
-    #[arg(long, global = true)]
-    once: bool,
-
-    /// CI mode: implies --all --once, emits NDJSON events to stdout, writes GitHub Actions job summary
+    /// CI mode: emits NDJSON events to stdout and writes a GitHub Actions job summary
     #[arg(long, global = true)]
     ci: bool,
 }
@@ -77,7 +73,7 @@ enum Commands {
         all: bool,
     },
 
-    /// Swap registered packages into node_modules (blocks with file watcher unless --once is passed)
+    /// Hold registered packages hijacked so installs resolve to your local copies (blocks until ctrl-c)
     Install {
         /// Package name(s) to install. If not in package.json, they will be injected temporarily.
         names: Vec<String>,
@@ -89,17 +85,9 @@ enum Commands {
         /// Skip interactive prompts and select all matching packages
         #[arg(long)]
         all: bool,
-
-        /// Swap packages and exit immediately (don't start the file watcher)
-        #[arg(long)]
-        once: bool,
-
-        /// Add new packages as devDependencies instead of dependencies
-        #[arg(long)]
-        dev: bool,
     },
 
-    /// Swap local packages and run your dev server (blocks until ctrl-c)
+    /// Hold packages hijacked and run your dev server (blocks until ctrl-c)
     Dev {
         /// Path to the consumer project (defaults to current directory)
         #[arg(short, long)]
@@ -143,6 +131,15 @@ enum Commands {
         /// Log every request that passes through
         #[arg(long, short)]
         verbose: bool,
+
+        /// Package answered from the local store instead of upstream. Repeatable.
+        #[arg(long = "hijack")]
+        hijack: Vec<String>,
+
+        /// Shut down when stdin closes. Used by `smuggle install` to stop the
+        /// proxy it started, since it cannot signal a root process.
+        #[arg(long, hide = true)]
+        exit_on_parent_close: bool,
     },
 
     /// Remove the local CA, the shell profile entry, and any leftover registry redirect
@@ -158,7 +155,6 @@ fn main() {
 
     let ci = cli.ci;
     let all = cli.all || ci;
-    let once = cli.once || ci;
 
     let mut summary = ci::SummaryCollector::new();
 
@@ -186,15 +182,11 @@ fn main() {
             names,
             path,
             all: inst_all,
-            once: inst_once,
-            dev,
         }) => {
             let consumer_dir = path
                 .or(cli.path)
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
-            let all = inst_all || all;
-            let once = inst_once || once;
-            install::cmd_install(&consumer_dir, all, once, ci, dev, &names, &mut summary)
+            install::cmd_install(&consumer_dir, inst_all || all, &names)
         }
         Some(Commands::Setup) => setup::cmd_setup(),
         Some(Commands::Cleanup) => setup::cmd_cleanup(),
@@ -204,6 +196,8 @@ fn main() {
             listen,
             no_redirect,
             verbose,
+            hijack,
+            exit_on_parent_close,
         }) => {
             let hosts = if hosts.is_empty() {
                 net::DEFAULT_REGISTRY_HOSTS
@@ -223,6 +217,8 @@ fn main() {
                 hosts,
                 no_redirect,
                 verbose,
+                hijack,
+                exit_on_parent_close,
             })
         }
         Some(Commands::HostsClear) => net::hosts::remove(),
@@ -245,15 +241,7 @@ fn main() {
         None => {
             // bare `smuggle` or `smuggle <names>` = `smuggle install`
             let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            install::cmd_install(
-                &consumer_dir,
-                all,
-                once,
-                ci,
-                false,
-                &cli.names,
-                &mut summary,
-            )
+            install::cmd_install(&consumer_dir, all, &cli.names)
         }
     };
 

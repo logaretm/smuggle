@@ -24,21 +24,9 @@ pub enum Event<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
     },
-    #[serde(rename = "install")]
-    Install {
-        package: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        location: Option<&'a str>,
-        status: Status,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        duration_ms: Option<u64>,
-    },
     #[serde(rename = "summary")]
     Summary {
         published: usize,
-        installed: usize,
         failed: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
@@ -52,7 +40,6 @@ pub enum Event<'a> {
 pub enum Status {
     Ok,
     Error,
-    Skipped,
 }
 
 /// Emit a single NDJSON line to stdout.
@@ -121,19 +108,13 @@ impl SummaryCollector {
             .iter()
             .filter(|r| r.action == "publish" && r.status == "ok")
             .count();
-        let installed = self
-            .rows
-            .iter()
-            .filter(|r| r.action == "install" && r.status == "ok")
-            .count();
         let failed = self.rows.iter().filter(|r| r.status == "error").count();
 
         let mut md = String::new();
         md.push_str("### 📦 Smuggle Summary\n\n");
         md.push_str(&format!(
-            "**{}** published, **{}** installed, **{}** failed — completed in {}\n\n",
+            "**{}** published, **{}** failed, completed in {}\n\n",
             published,
-            installed,
             failed,
             format_duration(total_ms)
         ));
@@ -145,7 +126,6 @@ impl SummaryCollector {
                 let status_icon = match row.status.as_str() {
                     "ok" => "✅",
                     "error" => "❌",
-                    "skipped" => "⏭️",
                     _ => "❓",
                 };
                 md.push_str(&format!(

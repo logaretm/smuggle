@@ -25,7 +25,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
-use super::{ca, hosts, loopback};
+use super::{ca, hijack, hosts, loopback};
+use crate::store;
 
 /// Hop-by-hop headers, which must not be forwarded across a proxy hop.
 /// See RFC 9110 section 7.6.1.
@@ -56,6 +57,12 @@ pub struct Config {
     pub no_redirect: bool,
     /// Log every request and every connection error.
     pub verbose: bool,
+    /// Packages answered from the local store instead of upstream.
+    pub hijack: Vec<String>,
+    /// Shut down when stdin reaches EOF. The proxy runs as root, so its
+    /// unprivileged parent cannot signal it; closing the pipe is how a session
+    /// tells it to stop, and it also covers the parent being killed outright.
+    pub exit_on_parent_close: bool,
 }
 
 /// Run the proxy in the foreground until interrupted. Requires root, both to
@@ -132,6 +139,8 @@ async fn serve(config: &Config, upstreams: HashMap<String, Vec<SocketAddr>>) -> 
 
     let tls = Arc::new(tls_acceptor()?);
     let client = Arc::new(upstream_client(upstreams));
+    let hijacked: Arc<std::collections::HashSet<String>> =
+        Arc::new(config.hijack.iter().cloned().collect());
 
     if config.no_redirect {
         let _ = cliclack::log::info(format!(
@@ -153,7 +162,7 @@ async fn serve(config: &Config, upstreams: HashMap<String, Vec<SocketAddr>>) -> 
     }
 
     let verbose = config.verbose;
-    let shutdown = shutdown_signal();
+    let shutdown = shutdown_signal(config.exit_on_parent_close);
     tokio::pin!(shutdown);
 
     loop {
@@ -163,8 +172,9 @@ async fn serve(config: &Config, upstreams: HashMap<String, Vec<SocketAddr>>) -> 
                 let Ok((stream, _)) = accepted else { continue };
                 let tls = tls.clone();
                 let client = client.clone();
+                let hijacked = hijacked.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, tls, client, verbose).await {
+                    if let Err(e) = handle_connection(stream, tls, client, hijacked, verbose).await {
                         if verbose {
                             let _ = cliclack::log::warning(e);
                         }
@@ -177,7 +187,7 @@ async fn serve(config: &Config, upstreams: HashMap<String, Vec<SocketAddr>>) -> 
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(on_parent_close: bool) {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut term = match signal(SignalKind::terminate()) {
@@ -192,6 +202,22 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = term.recv() => {}
         _ = int.recv() => {}
+        _ = parent_closed(), if on_parent_close => {}
+    }
+}
+
+/// Resolves when stdin reaches EOF, which happens when the parent session
+/// drops its end of the pipe or dies.
+async fn parent_closed() {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdin = tokio::io::stdin();
+    let mut scratch = [0u8; 64];
+    loop {
+        match stdin.read(&mut scratch).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
     }
 }
 
@@ -199,6 +225,7 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     tls: Arc<tokio_rustls::TlsAcceptor>,
     client: Arc<UpstreamClient>,
+    hijacked: Arc<std::collections::HashSet<String>>,
     verbose: bool,
 ) -> Result<(), String> {
     let stream = tls
@@ -219,7 +246,8 @@ async fn handle_connection(
     let service = hyper::service::service_fn(move |req: Request<Incoming>| {
         let client = client.clone();
         let sni = sni.clone();
-        async move { forward(req, sni, client, verbose).await }
+        let hijacked = hijacked.clone();
+        async move { forward(req, sni, client, hijacked, verbose).await }
     });
 
     hyper::server::conn::http1::Builder::new()
@@ -233,6 +261,7 @@ async fn forward(
     req: Request<Incoming>,
     host: String,
     client: Arc<UpstreamClient>,
+    hijacked: Arc<std::collections::HashSet<String>>,
     verbose: bool,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     let path = req
@@ -241,6 +270,31 @@ async fn forward(
         .map(|p| p.as_str())
         .unwrap_or("/")
         .to_string();
+
+    // Decide up front whether this request belongs to a package we answer for.
+    let target = match hijack::parse_route(&path) {
+        hijack::Route::Tarball(name) if hijacked.contains(&name) => Some((name, Kind::Tarball)),
+        hijack::Route::Packument(name) if hijacked.contains(&name) => Some((name, Kind::Packument)),
+        hijack::Route::Manifest(name) if hijacked.contains(&name) => Some((name, Kind::Manifest)),
+        _ => None,
+    };
+
+    // A tarball is served straight from the store without touching the network,
+    // whatever version the client asked for.
+    if let Some((name, Kind::Tarball)) = &target {
+        return Ok(match store::load_tarball(name) {
+            Ok(tarball) => {
+                if verbose {
+                    let _ = cliclack::log::success(format!(
+                        "smuggled {name} ({} bytes)",
+                        tarball.len()
+                    ));
+                }
+                tarball_response(tarball)
+            }
+            Err(e) => bad_gateway(&format!("no packed tarball for {name}: {e}")),
+        });
+    }
 
     let (mut parts, body) = req.into_parts();
     let Ok(uri) = format!("https://{host}{path}").parse() else {
@@ -269,6 +323,14 @@ async fn forward(
     // chunked GET, so bodyless requests must carry a genuinely empty body.
     let body: ProxyBody = if has_body { body.boxed() } else { empty_body() };
 
+    // Rewriting needs to read the JSON, so ask upstream not to compress it.
+    if target.is_some() {
+        parts.headers.insert(
+            hyper::header::ACCEPT_ENCODING,
+            hyper::header::HeaderValue::from_static("identity"),
+        );
+    }
+
     if verbose {
         let _ = cliclack::log::remark(format!("-> {} {}", parts.method, parts.uri));
     }
@@ -282,22 +344,88 @@ async fn forward(
             for name in HOP_BY_HOP {
                 parts.headers.remove(*name);
             }
-            Ok(Response::from_parts(parts, body.boxed()))
+
+            match target {
+                Some((name, kind)) if parts.status.is_success() => {
+                    Ok(rewrite_response(parts, body, &name, kind, verbose).await)
+                }
+                _ => Ok(Response::from_parts(parts, body.boxed())),
+            }
         }
         Err(e) => Ok(bad_gateway(&format!("upstream request failed: {e}"))),
     }
 }
 
-fn bad_gateway(message: &str) -> Response<ProxyBody> {
-    use http_body_util::Full;
+/// Which flavour of document a hijacked request is asking for.
+#[derive(Clone, Copy)]
+enum Kind {
+    Packument,
+    Manifest,
+    Tarball,
+}
 
+/// Replace the integrity in an upstream packument or manifest with the hashes
+/// of the tarball we will serve for it.
+async fn rewrite_response(
+    mut parts: hyper::http::response::Parts,
+    body: Incoming,
+    name: &str,
+    kind: Kind,
+    verbose: bool,
+) -> Response<ProxyBody> {
+    let tarball = match store::load_tarball(name) {
+        Ok(t) => t,
+        Err(e) => return bad_gateway(&format!("no packed tarball for {name}: {e}")),
+    };
+
+    let original = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => return bad_gateway(&format!("could not read the upstream body: {e}")),
+    };
+
+    let rewritten = match kind {
+        Kind::Packument => hijack::rewrite_packument(&original, &tarball),
+        Kind::Manifest => hijack::rewrite_manifest(&original, &tarball),
+        // Tarballs never reach here; they are served before the upstream call.
+        Kind::Tarball => Ok(original.to_vec()),
+    };
+
+    let rewritten = match rewritten {
+        Ok(bytes) => bytes,
+        Err(e) => return bad_gateway(&format!("could not rewrite the {name} document: {e}")),
+    };
+
+    if verbose {
+        let _ = cliclack::log::success(format!("rewrote integrity for {name}"));
+    }
+
+    // Re-encoding changes the length, and any upstream encoding no longer
+    // describes the body we are sending.
+    parts.headers.remove(hyper::header::CONTENT_ENCODING);
+    parts.headers.remove(hyper::header::CONTENT_LENGTH);
+    parts.headers.remove(hyper::header::ETAG);
+
+    Response::from_parts(parts, full_body(rewritten))
+}
+
+fn tarball_response(tarball: Vec<u8>) -> Response<ProxyBody> {
+    Response::builder()
+        .status(hyper::StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+        .body(full_body(tarball))
+        .expect("tarball response is well-formed")
+}
+
+fn full_body(bytes: Vec<u8>) -> ProxyBody {
+    http_body_util::Full::new(bytes::Bytes::from(bytes))
+        .map_err(|never| match never {})
+        .boxed()
+}
+
+fn bad_gateway(message: &str) -> Response<ProxyBody> {
     Response::builder()
         .status(hyper::StatusCode::BAD_GATEWAY)
-        .body(
-            Full::new(bytes::Bytes::from(message.to_string()))
-                .map_err(|never| match never {})
-                .boxed(),
-        )
+        .body(full_body(message.as_bytes().to_vec()))
         .expect("bad gateway response is well-formed")
 }
 

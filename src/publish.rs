@@ -163,7 +163,6 @@ fn cmd_publish_workspace(
     if ci {
         ci::emit(&ci::Event::Summary {
             published,
-            installed: 0,
             failed: errors.len(),
             duration_ms: Some(ci::elapsed_ms(summary.start)),
         });

@@ -4,9 +4,11 @@ mod backup;
 mod ci;
 mod dev;
 mod install;
+mod net;
 mod pack;
 mod pm;
 mod publish;
+mod setup;
 mod store;
 mod watch;
 mod workspace;
@@ -14,6 +16,10 @@ mod workspace;
 use clap::{Parser, Subcommand};
 use console::style;
 use std::path::PathBuf;
+
+/// Hidden subcommand used to re-invoke ourselves under sudo for the one step
+/// that needs root: editing the /etc/hosts redirect.
+pub const HOSTS_CLEAR_CMD: &str = "__hosts-clear";
 
 #[derive(Parser)]
 #[command(
@@ -111,6 +117,40 @@ enum Commands {
         #[arg(last = true)]
         command: Vec<String>,
     },
+
+    /// Install the local CA that lets smuggle intercept registry traffic (one-time, non-blocking)
+    Setup,
+
+    /// Run the interception proxy in the foreground until ctrl-c (needs sudo)
+    Proxy {
+        /// Registry host to intercept. Repeatable. Defaults to the npm and yarn registries.
+        #[arg(long = "host")]
+        hosts: Vec<String>,
+
+        /// Port to listen on (default 443)
+        #[arg(long, default_value_t = 443)]
+        port: u16,
+
+        /// Loopback address to listen on (default 127.0.0.2, added to lo0 while running)
+        #[arg(long)]
+        listen: Option<std::net::IpAddr>,
+
+        /// Listen without editing /etc/hosts. Nothing is intercepted; clients
+        /// have to be pointed at the proxy explicitly.
+        #[arg(long)]
+        no_redirect: bool,
+
+        /// Log every request that passes through
+        #[arg(long, short)]
+        verbose: bool,
+    },
+
+    /// Remove the local CA, the shell profile entry, and any leftover registry redirect
+    Cleanup,
+
+    /// Clear the /etc/hosts redirect. Internal: re-invoked under sudo by cleanup.
+    #[command(name = HOSTS_CLEAR_CMD, hide = true)]
+    HostsClear,
 }
 
 fn main() {
@@ -121,6 +161,13 @@ fn main() {
     let once = cli.once || ci;
 
     let mut summary = ci::SummaryCollector::new();
+
+    // A proxy killed with SIGKILL cannot clean up after itself, so every
+    // invocation checks for a redirect whose owner is gone before doing
+    // anything that might route through it.
+    if !ci && !matches!(cli.command, Some(Commands::HostsClear | Commands::Cleanup)) {
+        setup::reconcile_stale_redirect();
+    }
 
     let result: Result<(), String> = match cli.command {
         Some(Commands::Publish { path, all: pub_all }) => {
@@ -149,6 +196,36 @@ fn main() {
             let once = inst_once || once;
             install::cmd_install(&consumer_dir, all, once, ci, dev, &names, &mut summary)
         }
+        Some(Commands::Setup) => setup::cmd_setup(),
+        Some(Commands::Cleanup) => setup::cmd_cleanup(),
+        Some(Commands::Proxy {
+            hosts,
+            port,
+            listen,
+            no_redirect,
+            verbose,
+        }) => {
+            let hosts = if hosts.is_empty() {
+                net::DEFAULT_REGISTRY_HOSTS
+                    .iter()
+                    .map(|h| h.to_string())
+                    .collect()
+            } else {
+                hosts
+            };
+            net::proxy::run(net::proxy::Config {
+                listen_ip: listen.unwrap_or_else(|| {
+                    net::LISTEN_IP
+                        .parse()
+                        .expect("LISTEN_IP is a valid address")
+                }),
+                port,
+                hosts,
+                no_redirect,
+                verbose,
+            })
+        }
+        Some(Commands::HostsClear) => net::hosts::remove(),
         Some(Commands::Dev {
             path,
             all,

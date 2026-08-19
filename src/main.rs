@@ -1,13 +1,9 @@
 #![allow(clippy::collapsible_if)]
 
-mod ci;
-mod dev;
-mod install;
 mod net;
 mod pack;
-mod pm;
-mod proxy_session;
 mod publish;
+mod session;
 mod setup;
 mod store;
 mod watch;
@@ -24,38 +20,48 @@ pub const HOSTS_CLEAR_CMD: &str = "__hosts-clear";
 #[derive(Parser)]
 #[command(
     name = "smuggle",
-    about = "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
-    after_help = "By default, install/dev start a file watcher that blocks until you press ctrl-c.\nUse --once to swap packages and exit immediately (useful for scripts and non-interactive environments).\nUse --ci for CI pipelines (implies --all --once, emits NDJSON, writes GitHub Actions summary)."
+    about = "Hijack npm registry requests so your local packages are served instead",
+    after_help = "smuggle does not install anything. It intercepts registry traffic for the\npackages you select and serves your local copies, for as long as it runs.\nRun your own package manager's install while it is up.\n\nRun `smuggle setup` once before first use."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Package name(s) to install (e.g. `smuggle @scope/pkg`)
+    /// Package name(s) to hijack (e.g. `smuggle @scope/pkg`)
     names: Vec<String>,
 
     /// Path to the consumer project (defaults to current directory)
     #[arg(short, long, global = true)]
     path: Option<PathBuf>,
 
-    /// Skip interactive prompts and select all matching packages automatically
+    /// Skip interactive prompts and select all matching packages
     #[arg(long, global = true)]
     all: bool,
-
-    /// CI mode: emits NDJSON events to stdout and writes a GitHub Actions job summary
-    #[arg(long, global = true)]
-    ci: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pack and register a local package for later use (non-blocking, exits after packing)
+    /// Pack and register a local package so it can be hijacked (non-blocking)
     Publish {
         /// Path to the package directory (defaults to current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
 
         /// In a workspace, publish all non-private packages (skip interactive selection)
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Hijack registered packages until ctrl-c. This is what bare `smuggle` runs.
+    Hijack {
+        /// Package name(s) to hijack. Defaults to registered packages the project depends on.
+        names: Vec<String>,
+
+        /// Path to the consumer project (defaults to current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+
+        /// Skip interactive prompts and select all matching packages
         #[arg(long)]
         all: bool,
     },
@@ -73,41 +79,11 @@ enum Commands {
         all: bool,
     },
 
-    /// Hold registered packages hijacked so installs resolve to your local copies (blocks until ctrl-c)
-    Install {
-        /// Package name(s) to install. If not in package.json, they will be injected temporarily.
-        names: Vec<String>,
-
-        /// Path to the consumer project (defaults to current directory)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Skip interactive prompts and select all matching packages
-        #[arg(long)]
-        all: bool,
-    },
-
-    /// Hold packages hijacked and run your dev server (blocks until ctrl-c)
-    Dev {
-        /// Path to the consumer project (defaults to current directory)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Skip interactive prompts and select all matching packages
-        #[arg(long)]
-        all: bool,
-
-        /// Kill and restart the dev server on each package change (instead of relying on HMR)
-        #[arg(long)]
-        restart: bool,
-
-        /// Dev server command (auto-detected from package.json "dev" script if omitted)
-        #[arg(last = true)]
-        command: Vec<String>,
-    },
-
     /// Install the local CA that lets smuggle intercept registry traffic (one-time, non-blocking)
     Setup,
+
+    /// Remove the local CA, the shell profile entry, and any leftover registry redirect
+    Cleanup,
 
     /// Run the interception proxy in the foreground until ctrl-c (needs sudo)
     Proxy {
@@ -136,14 +112,11 @@ enum Commands {
         #[arg(long = "hijack")]
         hijack: Vec<String>,
 
-        /// Shut down when stdin closes. Used by `smuggle install` to stop the
-        /// proxy it started, since it cannot signal a root process.
+        /// Shut down when stdin closes. Used by a session to stop the proxy it
+        /// started, since it cannot signal a root process.
         #[arg(long, hide = true)]
         exit_on_parent_close: bool,
     },
-
-    /// Remove the local CA, the shell profile entry, and any leftover registry redirect
-    Cleanup,
 
     /// Clear the /etc/hosts redirect. Internal: re-invoked under sudo by cleanup.
     #[command(name = HOSTS_CLEAR_CMD, hide = true)]
@@ -152,44 +125,41 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
-
-    let ci = cli.ci;
-    let all = cli.all || ci;
-
-    let mut summary = ci::SummaryCollector::new();
+    let all = cli.all;
 
     // A proxy killed with SIGKILL cannot clean up after itself, so every
     // invocation checks for a redirect whose owner is gone before doing
     // anything that might route through it.
-    if !ci && !matches!(cli.command, Some(Commands::HostsClear | Commands::Cleanup)) {
+    if !matches!(cli.command, Some(Commands::HostsClear | Commands::Cleanup)) {
         setup::reconcile_stale_redirect();
     }
 
+    let cwd = || std::env::current_dir().expect("current directory is readable");
+
     let result: Result<(), String> = match cli.command {
         Some(Commands::Publish { path, all: pub_all }) => {
-            let pkg_dir = path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            publish::cmd_publish(&pkg_dir, pub_all || all, ci, &mut summary)
+            publish::cmd_publish(&path.unwrap_or_else(cwd), pub_all || all)
         }
+        Some(Commands::Hijack {
+            names,
+            path,
+            all: hijack_all,
+        }) => session::run(
+            &path.or(cli.path).unwrap_or_else(cwd),
+            hijack_all || all,
+            &names,
+        ),
         Some(Commands::List) => {
-            cmd_list(ci);
+            cmd_list();
             Ok(())
         }
         Some(Commands::Unpublish {
             name,
             all: unpub_all,
         }) => cmd_unpublish(name.as_deref(), unpub_all || all),
-        Some(Commands::Install {
-            names,
-            path,
-            all: inst_all,
-        }) => {
-            let consumer_dir = path
-                .or(cli.path)
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
-            install::cmd_install(&consumer_dir, inst_all || all, &names)
-        }
         Some(Commands::Setup) => setup::cmd_setup(),
         Some(Commands::Cleanup) => setup::cmd_cleanup(),
+        Some(Commands::HostsClear) => net::hosts::remove(),
         Some(Commands::Proxy {
             hosts,
             port,
@@ -221,54 +191,18 @@ fn main() {
                 exit_on_parent_close,
             })
         }
-        Some(Commands::HostsClear) => net::hosts::remove(),
-        Some(Commands::Dev {
-            path,
-            all,
-            restart,
-            command,
-        }) => {
-            let consumer_dir = path
-                .or(cli.path)
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
-            let all = all || cli.all;
-            if let Err(e) = dev::cmd_dev(&consumer_dir, all, restart, &command) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
-            Ok(())
-        }
-        None => {
-            // bare `smuggle` or `smuggle <names>` = `smuggle install`
-            let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            install::cmd_install(&consumer_dir, all, &cli.names)
-        }
+        // bare `smuggle` or `smuggle <names>` is the same as `smuggle hijack`
+        None => session::run(&cli.path.unwrap_or_else(cwd), all, &cli.names),
     };
 
-    // Write GitHub Actions job summary if applicable
-    if ci {
-        summary.write_github_summary();
-    }
-
     if let Err(e) = result {
-        if ci {
-            ci::emit(&ci::Event::Error { message: &e });
-        } else {
-            let _ = cliclack::outro(format!("{}", style(e).red()));
-        }
+        let _ = cliclack::outro(format!("{}", style(e).red()));
         std::process::exit(1);
     }
 }
 
-fn cmd_list(ci: bool) {
+fn cmd_list() {
     let packages = store::list();
-
-    if ci {
-        if let Ok(out) = serde_json::to_string(&packages) {
-            println!("{out}");
-        }
-        return;
-    }
 
     if packages.is_empty() {
         let _ = cliclack::log::info(format!(
@@ -297,16 +231,11 @@ fn cmd_unpublish(name: Option<&str>, all: bool) -> Result<(), String> {
 
     let names = if let Some(n) = name {
         vec![n.to_string()]
+    } else if packages.is_empty() {
+        return Err("no packages registered".to_string());
     } else if all {
-        if packages.is_empty() {
-            return Err("no packages registered".to_string());
-        }
         packages.iter().map(|e| e.name.clone()).collect()
     } else {
-        if packages.is_empty() {
-            return Err("no packages registered".to_string());
-        }
-
         let mut prompt = cliclack::multiselect("Select packages to remove");
         for (i, entry) in packages.iter().enumerate() {
             let label = format!("{} @ {}", entry.name, entry.version);

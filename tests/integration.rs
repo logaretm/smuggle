@@ -354,12 +354,12 @@ fn unpublish_nonexistent_fails() {
 // ─── Install ────────────────────────────────────────────────
 
 #[test]
-fn install_no_matching_packages() {
+fn hijack_no_matching_packages() {
     let tmp = TempDir::new().unwrap();
     create_consumer(tmp.path(), &[("some-random-pkg", "^1.0.0")]);
 
     smuggle()
-        .args(["install", "--all", "--path"])
+        .args(["hijack", "--all", "--path"])
         .arg(tmp.path())
         .assert()
         .failure()
@@ -367,11 +367,11 @@ fn install_no_matching_packages() {
 }
 
 #[test]
-fn install_no_package_json() {
+fn hijack_no_package_json() {
     let tmp = TempDir::new().unwrap();
 
     smuggle()
-        .args(["install", "--all", "--path"])
+        .args(["hijack", "--all", "--path"])
         .arg(tmp.path())
         .assert()
         .failure()

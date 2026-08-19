@@ -1,28 +1,128 @@
+//! A smuggle session: the packages to answer for, and the proxy that answers.
+//!
+//! smuggle does not install anything. It holds a set of packages hijacked for
+//! as long as the session runs, and you drive your own package manager. The
+//! proxy needs root, so it runs as a child process under sudo, and it reads
+//! tarballs from the store on every request, which means a repack is picked up
+//! without any further coordination: the store is the control plane.
+
 use console::style;
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use std::path::Path;
 
-use crate::{pack, proxy_session, store};
+use crate::{pack, store, watch};
 
-/// Select registered packages and hold them hijacked for as long as this
-/// command runs, repacking whenever their sources change.
-pub fn cmd_install(consumer_dir: &Path, select_all: bool, names: &[String]) -> Result<(), String> {
+/// A running proxy. Dropping this closes the pipe the proxy is reading, which
+/// is how it learns to shut down and undo the redirect.
+pub struct Proxy {
+    child: Child,
+}
+
+impl Drop for Proxy {
+    fn drop(&mut self) {
+        // Closing stdin is the shutdown signal. The proxy runs as root, so an
+        // unprivileged parent cannot signal it directly.
+        drop(self.child.stdin.take());
+        let _ = self.child.wait();
+    }
+}
+
+/// Start the proxy with `packages` hijacked, prompting for sudo if needed.
+pub fn start(packages: &[String]) -> Result<Proxy, String> {
+    let exe =
+        std::env::current_exe().map_err(|e| format!("could not locate the smuggle binary: {e}"))?;
+
+    prime_sudo()?;
+
+    let mut command = Command::new("sudo");
+    command.arg("-n").arg(&exe).arg("proxy");
+    for name in packages {
+        command.arg("--hijack").arg(name);
+    }
+    command
+        .arg("--exit-on-parent-close")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let child = command
+        .spawn()
+        .map_err(|e| format!("failed to start the proxy: {e}"))?;
+
+    Ok(Proxy { child })
+}
+
+/// Ask for the sudo password once, up front, so the proxy itself can be
+/// launched with a piped stdin it will use only as a shutdown signal.
+fn prime_sudo() -> Result<(), String> {
+    let already_valid = Command::new("sudo")
+        .args(["-n", "true"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if already_valid {
+        return Ok(());
+    }
+
+    let _ = cliclack::log::remark("The proxy binds :443 and edits /etc/hosts, so it needs sudo");
+    let status = Command::new("sudo")
+        .arg("-v")
+        .status()
+        .map_err(|e| format!("failed to run sudo: {e}"))?;
+
+    if !status.success() {
+        return Err("sudo was declined".into());
+    }
+    Ok(())
+}
+
+/// Select packages and hold them hijacked until interrupted, repacking
+/// whenever their sources change.
+pub fn run(consumer_dir: &Path, select_all: bool, names: &[String]) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
 
-    let _ = cliclack::intro(style(" smuggle install ").on_cyan().black());
+    let _ = cliclack::intro(style(" smuggle ").on_cyan().black());
 
     let selected = select_packages(&consumer_dir, select_all, names)?;
-    proxy_session::run(&selected, &mut |_| {})
+    let names: Vec<String> = selected.iter().map(|e| e.name.clone()).collect();
+    let refs: Vec<&store::StoreEntry> = selected.iter().collect();
+
+    let _proxy = start(&names)?;
+
+    let _ = cliclack::log::success(format!(
+        "Hijacking {}",
+        style(names.join(", ")).cyan().bold(),
+    ));
+    let _ = cliclack::log::info(format!(
+        "Run your package manager's install and it will resolve to your local copy.\nEdits are repacked automatically. Press {} to stop.",
+        style("ctrl-c").cyan(),
+    ));
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let flag = shutdown.clone();
+    let _ = ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst));
+
+    watch::watch_and_repack(&refs, &mut |_| {}, &shutdown)?;
+
+    let _ = cliclack::outro("Stopped. Nothing is intercepted any more.");
+    Ok(())
 }
 
 /// Resolve which registered packages this session should answer for.
 ///
 /// Explicit names are taken as given. Otherwise the consumer's dependencies
 /// are matched against the store. Either way the result is expanded with any
-/// registered package the selection depends on, so a smuggled package that
-/// depends on another smuggled package gets both.
-pub fn select_packages(
+/// registered package the selection depends on, so a hijacked package that
+/// depends on another hijacked package gets both.
+fn select_packages(
     consumer_dir: &Path,
     select_all: bool,
     names: &[String],
@@ -93,7 +193,7 @@ fn consumer_dependencies(consumer_dir: &Path) -> Result<std::collections::HashSe
 fn prompt_for_packages<'a>(
     matches: &[&'a store::StoreEntry],
 ) -> Result<Vec<&'a store::StoreEntry>, String> {
-    let mut prompt = cliclack::multiselect("Select packages to smuggle");
+    let mut prompt = cliclack::multiselect("Select packages to hijack");
     for (i, entry) in matches.iter().enumerate() {
         let label = format!("{} @ {}", entry.name, entry.version);
         let hint = entry.source_dir.display().to_string();
@@ -112,7 +212,7 @@ fn prompt_for_packages<'a>(
 }
 
 /// Pull in any registered package the selection depends on, transitively.
-pub fn expand_with_registered_deps(
+fn expand_with_registered_deps(
     selected: &[&store::StoreEntry],
     registered: &[store::StoreEntry],
 ) -> Vec<store::StoreEntry> {

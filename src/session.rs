@@ -31,7 +31,7 @@ impl Drop for Proxy {
 }
 
 /// Start the proxy with `packages` hijacked, prompting for sudo if needed.
-pub fn start(packages: &[String]) -> Result<Proxy, String> {
+pub fn start(packages: &[String], verbose: bool) -> Result<Proxy, String> {
     let exe =
         std::env::current_exe().map_err(|e| format!("could not locate the smuggle binary: {e}"))?;
 
@@ -41,6 +41,9 @@ pub fn start(packages: &[String]) -> Result<Proxy, String> {
     command.arg("-n").arg(&exe).arg("proxy");
     for name in packages {
         command.arg("--hijack").arg(name);
+    }
+    if verbose {
+        command.arg("--verbose");
     }
     command
         .arg("--exit-on-parent-close")
@@ -84,7 +87,12 @@ fn prime_sudo() -> Result<(), String> {
 
 /// Select packages and hold them hijacked until interrupted, repacking
 /// whenever their sources change.
-pub fn run(consumer_dir: &Path, select_all: bool, names: &[String]) -> Result<(), String> {
+pub fn run(
+    consumer_dir: &Path,
+    select_all: bool,
+    names: &[String],
+    verbose: bool,
+) -> Result<(), String> {
     let consumer_dir = consumer_dir
         .canonicalize()
         .map_err(|e| format!("invalid path: {e}"))?;
@@ -95,7 +103,7 @@ pub fn run(consumer_dir: &Path, select_all: bool, names: &[String]) -> Result<()
     let names: Vec<String> = selected.iter().map(|e| e.name.clone()).collect();
     let refs: Vec<&store::StoreEntry> = selected.iter().collect();
 
-    let _proxy = start(&names)?;
+    let _proxy = start(&names, verbose)?;
 
     let _ = cliclack::log::success(format!(
         "Hijacking {}",

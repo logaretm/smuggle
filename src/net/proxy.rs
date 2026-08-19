@@ -284,12 +284,11 @@ async fn forward(
     if let Some((name, Kind::Tarball)) = &target {
         return Ok(match store::load_tarball(name) {
             Ok(tarball) => {
-                if verbose {
-                    let _ = cliclack::log::success(format!(
-                        "smuggled {name} ({} bytes)",
-                        tarball.len()
-                    ));
-                }
+                let _ = cliclack::log::success(format!(
+                    "served {} from the store ({} bytes)",
+                    style(name).cyan(),
+                    tarball.len(),
+                ));
                 tarball_response(tarball)
             }
             Err(e) => bad_gateway(&format!("no packed tarball for {name}: {e}")),
@@ -347,7 +346,7 @@ async fn forward(
 
             match target {
                 Some((name, kind)) if parts.status.is_success() => {
-                    Ok(rewrite_response(parts, body, &name, kind, verbose).await)
+                    Ok(rewrite_response(parts, body, &name, kind).await)
                 }
                 _ => Ok(Response::from_parts(parts, body.boxed())),
             }
@@ -371,7 +370,6 @@ async fn rewrite_response(
     body: Incoming,
     name: &str,
     kind: Kind,
-    verbose: bool,
 ) -> Response<ProxyBody> {
     let tarball = match store::load_tarball(name) {
         Ok(t) => t,
@@ -395,9 +393,15 @@ async fn rewrite_response(
         Err(e) => return bad_gateway(&format!("could not rewrite the {name} document: {e}")),
     };
 
-    if verbose {
-        let _ = cliclack::log::success(format!("rewrote integrity for {name}"));
-    }
+    let _ = cliclack::log::success(format!(
+        "rewrote {} integrity for {}",
+        match kind {
+            Kind::Packument => "packument",
+            Kind::Manifest => "manifest",
+            Kind::Tarball => "tarball",
+        },
+        style(name).cyan(),
+    ));
 
     // Re-encoding changes the length, and any upstream encoding no longer
     // describes the body we are sending.

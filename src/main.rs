@@ -37,6 +37,10 @@ struct Cli {
     /// Skip interactive prompts and select all matching packages
     #[arg(long, global = true)]
     all: bool,
+
+    /// Log every request the proxy handles, not just hijacked ones
+    #[arg(long, short, global = true)]
+    verbose: bool,
 }
 
 #[derive(Subcommand)]
@@ -105,7 +109,7 @@ enum Commands {
         no_redirect: bool,
 
         /// Log every request that passes through
-        #[arg(long, short)]
+        #[arg(long)]
         verbose: bool,
 
         /// Package answered from the local store instead of upstream. Repeatable.
@@ -148,6 +152,7 @@ fn main() {
             &path.or(cli.path).unwrap_or_else(cwd),
             hijack_all || all,
             &names,
+            cli.verbose,
         ),
         Some(Commands::List) => {
             cmd_list();
@@ -192,7 +197,7 @@ fn main() {
             })
         }
         // bare `smuggle` or `smuggle <names>` is the same as `smuggle hijack`
-        None => session::run(&cli.path.unwrap_or_else(cwd), all, &cli.names),
+        None => session::run(&cli.path.unwrap_or_else(cwd), all, &cli.names, cli.verbose),
     };
 
     if let Err(e) = result {

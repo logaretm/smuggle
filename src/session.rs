@@ -153,20 +153,20 @@ pub fn run(
     let lock = lockfile::detect(&consumer_dir)?;
 
     let registries = resolve_registries(&consumer_dir, extra_registries);
-    let _proxy = start(&names, &registries, verbose)?;
+    let registration = start(&names, &registries, verbose)?;
 
     let _ = cliclack::log::success(format!(
         "Hijacking {}",
         style(names.join(", ")).cyan().bold(),
     ));
 
-    // The pin is only satisfiable while the proxy runs, so it is restored when
-    // this drops, which must happen before the proxy goes away.
-    let _pin = lockfile::pin(&lock, &tarball_hashes(&names))?;
+    // The pin is only satisfiable while the proxy runs, so it is undone during
+    // teardown below, before interception stops.
+    let pin = lockfile::pin(&lock, &tarball_hashes(&names))?;
     lockfile::install(&consumer_dir, lock.kind)?;
 
     let _ = cliclack::log::info(format!(
-        "Your local build is installed. Edits are repacked and reinstalled automatically.\nPress {} to stop and restore the lockfile.",
+        "Your local build is installed. Edits are repacked and reinstalled automatically.\nPress {} to stop and put the real packages back.",
         style("ctrl-c").cyan(),
     ));
 
@@ -182,10 +182,64 @@ pub fn run(
         }
     };
 
-    watch::watch_and_repack(&refs, &mut on_repack, &shutdown)?;
+    let watched = watch::watch_and_repack(&refs, &mut on_repack, &shutdown);
 
-    let _ = cliclack::outro("Stopped. Restoring the lockfile; nothing is intercepted any more.");
-    Ok(())
+    // Tear down even if the watcher failed, otherwise a pinned lockfile
+    // outlives the session that could satisfy it.
+    teardown(pin, registration, &consumer_dir, lock.kind);
+    watched
+}
+
+/// Put the project back the way it was found.
+///
+/// Restoring the lockfile is not enough on its own: node_modules still holds
+/// the smuggled build, so the project keeps running local code until something
+/// reinstalls. Reinstalling here is cheap, because the original tarball is
+/// still in the package manager's cache under its original integrity.
+fn teardown(
+    pin: lockfile::Pin,
+    registration: Registration,
+    consumer_dir: &Path,
+    kind: lockfile::Kind,
+) {
+    // Order matters. The lockfile goes back to the real integrity first, then
+    // interception stops, and only then is it safe to reinstall: a fetch made
+    // while the proxy is still up would return smuggled bytes and fail the
+    // restored integrity check.
+    drop(pin);
+    drop(registration);
+
+    if !wait_for_interception_to_stop() {
+        let _ = cliclack::log::warning(
+            "Interception is still active, so the packages may not restore cleanly. Another smuggle session may be running.",
+        );
+    }
+
+    let _ = cliclack::log::remark("Putting the real packages back");
+    match lockfile::install(consumer_dir, kind) {
+        Ok(()) => {
+            let _ = cliclack::outro("Stopped. Your project is back to its published dependencies.");
+        }
+        Err(e) => {
+            let _ = cliclack::log::warning(format!("could not reinstall: {e}"));
+            let _ = cliclack::outro(
+                "Stopped, but node_modules may still hold your local build. Run your package manager's install.",
+            );
+        }
+    }
+}
+
+/// The daemon tears the redirect down asynchronously once we deregister, so
+/// give it a moment before reinstalling. Returns false if it is still up,
+/// which is legitimate when another session holds it.
+fn wait_for_interception_to_stop() -> bool {
+    for _ in 0..30 {
+        if crate::net::hosts::read_block().is_none() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
 }
 
 /// Re-pin and reinstall after a repack.

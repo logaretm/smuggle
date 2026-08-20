@@ -136,6 +136,11 @@ pub fn is_root() -> bool {
 /// Strip a redirect left behind by a proxy that died without cleaning up.
 /// Called at the start of every command so a crash can never keep intercepting.
 pub fn reconcile_stale_redirect() {
+    // A lockfile left pinned by a dead session is worse than a stranded
+    // redirect: it fails for anyone else who installs, or quietly ships a
+    // local build.
+    crate::lockfile::reconcile();
+
     let Some(block) = hosts::read_block() else {
         return;
     };

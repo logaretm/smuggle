@@ -1,5 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
+mod lockfile;
 mod net;
 mod pack;
 mod publish;

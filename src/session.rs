@@ -13,7 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::path::Path;
 
-use crate::{pack, store, watch};
+use std::collections::HashMap;
+
+use crate::net::hijack;
+use crate::{lockfile, pack, store, watch};
 
 /// A running proxy. Dropping this closes the pipe the proxy is reading, which
 /// is how it learns to shut down and undo the redirect.
@@ -141,6 +144,11 @@ pub fn run(
     let names: Vec<String> = selected.iter().map(|e| e.name.clone()).collect();
     let refs: Vec<&store::StoreEntry> = selected.iter().collect();
 
+    // Fail before touching anything if we cannot pin this project's lockfile,
+    // since without pinning the package manager resolves from cache and the
+    // proxy is never consulted.
+    let lock = lockfile::detect(&consumer_dir)?;
+
     let registries = resolve_registries(&consumer_dir, extra_registries);
     let _proxy = start(&names, &registries, verbose)?;
 
@@ -148,8 +156,14 @@ pub fn run(
         "Hijacking {}",
         style(names.join(", ")).cyan().bold(),
     ));
+
+    // The pin is only satisfiable while the proxy runs, so it is restored when
+    // this drops, which must happen before the proxy goes away.
+    let _pin = lockfile::pin(&lock, &tarball_hashes(&names))?;
+    lockfile::install(&consumer_dir, lock.kind)?;
+
     let _ = cliclack::log::info(format!(
-        "Run your package manager's install and it will resolve to your local copy.\nEdits are repacked automatically. Press {} to stop.",
+        "Your local build is installed. Edits are repacked and reinstalled automatically.\nPress {} to stop and restore the lockfile.",
         style("ctrl-c").cyan(),
     ));
 
@@ -157,10 +171,41 @@ pub fn run(
     let flag = shutdown.clone();
     let _ = ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst));
 
-    watch::watch_and_repack(&refs, &mut |_| {}, &shutdown)?;
+    // A repack changes the tarball, so the pin has to be rewritten and the
+    // install re-run for the new bytes to reach node_modules.
+    let mut on_repack = |_changed: &[String]| {
+        if let Err(e) = repin(&lock, &names, &consumer_dir) {
+            let _ = cliclack::log::warning(e);
+        }
+    };
 
-    let _ = cliclack::outro("Stopped. Nothing is intercepted any more.");
+    watch::watch_and_repack(&refs, &mut on_repack, &shutdown)?;
+
+    let _ = cliclack::outro("Stopped. Restoring the lockfile; nothing is intercepted any more.");
     Ok(())
+}
+
+/// Re-pin and reinstall after a repack.
+fn repin(lock: &lockfile::Lockfile, names: &[String], consumer_dir: &Path) -> Result<(), String> {
+    let original = std::fs::read_to_string(&lock.path)
+        .map_err(|e| format!("could not read {}: {e}", lock.path.display()))?;
+    let (rewritten, _) = lockfile::rewrite(lock.kind, &original, &tarball_hashes(names))?;
+    std::fs::write(&lock.path, rewritten)
+        .map_err(|e| format!("could not write {}: {e}", lock.path.display()))?;
+
+    lockfile::install(consumer_dir, lock.kind)
+}
+
+/// The integrity of what the proxy will serve for each package, which is what
+/// the lockfile has to claim for the fetch to be accepted.
+fn tarball_hashes(names: &[String]) -> HashMap<String, String> {
+    names
+        .iter()
+        .filter_map(|name| {
+            let tarball = store::load_tarball(name).ok()?;
+            Some((name.clone(), hijack::integrity_of(&tarball)))
+        })
+        .collect()
 }
 
 /// The registries to intercept: whatever npm is configured to use, plus the

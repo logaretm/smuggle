@@ -158,7 +158,12 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &Snapshot) {
             Style::default().fg(theme::DIM),
         )));
     }
-    for (i, item) in app.items.iter().enumerate() {
+    // The name takes whatever the version and size columns do not, so a wide
+    // terminal shows full package names instead of truncating to a fixed width.
+    let name_width = (inner.width as usize).saturating_sub(23).max(8);
+
+    let (start, end) = window(app.selected, app.items.len(), inner.height as usize);
+    for (i, item) in app.items.iter().enumerate().take(end).skip(start) {
         let on = app.hijacked.contains(&item.entry.name);
         let selected = i == app.selected;
 
@@ -175,7 +180,11 @@ fn draw_session(frame: &mut Frame, area: Rect, app: &Snapshot) {
                     .bg(row_bg),
             ),
             Span::styled(
-                format!("{:<16}", truncate(&item.entry.name, 16)),
+                format!(
+                    "{:<width$}",
+                    truncate(&item.entry.name, name_width),
+                    width = name_width
+                ),
                 Style::default()
                     .fg(if selected {
                         theme::TEXT_STRONG
@@ -233,7 +242,8 @@ fn draw_store(frame: &mut Frame, area: Rect, app: &Snapshot) {
             Style::default().fg(theme::DIM),
         )));
     }
-    for (i, item) in app.items.iter().enumerate() {
+    let (start, end) = window(app.selected, app.items.len(), inner.height as usize);
+    for (i, item) in app.items.iter().enumerate().take(end).skip(start) {
         let selected = i == app.selected;
         let mut spans = vec![
             Span::styled(
@@ -353,6 +363,18 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, app: &Snapshot) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// The slice of a list to draw so the selection stays on screen.
+fn window(selected: usize, len: usize, height: usize) -> (usize, usize) {
+    if height == 0 || len == 0 {
+        return (0, 0);
+    }
+    // Keep the selection in view by scrolling only as far as it needs.
+    let start = selected
+        .saturating_sub(height.saturating_sub(1))
+        .min(len.saturating_sub(height).max(0));
+    (start, (start + height).min(len))
+}
+
 /// Clip to a column width, since a wrapped row would push the panel's bottom
 /// border off a narrow terminal.
 fn truncate(text: &str, width: usize) -> String {
@@ -399,7 +421,11 @@ mod tests {
     }
 
     fn render(snapshot: &Snapshot) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        render_at(snapshot, 100, 24)
+    }
+
+    fn render_at(snapshot: &Snapshot, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| draw(frame, snapshot)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         (0..buffer.area.height)
@@ -469,6 +495,57 @@ mod tests {
         // The empty activity panel has to explain itself, or a session that is
         // doing nothing looks identical to one that is broken.
         assert!(out.contains("pick a package"), "{out}");
+    }
+
+    #[test]
+    fn a_wide_panel_shows_full_package_names() {
+        // The name column takes whatever the other columns leave, so a wide
+        // terminal should not truncate a name that easily fits.
+        let items = vec![item("@sentry/browser-utils", false)];
+        let hijacked = HashSet::new();
+        let report = empty_report();
+        let snapshot = base(&items, &hijacked, &report);
+
+        let wide = render_at(&snapshot, 160, 24);
+        assert!(wide.contains("@sentry/browser-utils"), "{wide}");
+        assert!(wide.contains("2 KB"), "size must survive too:\n{wide}");
+
+        // The same name does not fit a narrow one, and is clipped rather than
+        // pushing the size off the edge.
+        let narrow = render_at(&snapshot, 80, 24);
+        assert!(narrow.contains('…'), "{narrow}");
+        assert!(narrow.contains("2 KB"), "{narrow}");
+    }
+
+    #[test]
+    fn the_window_keeps_the_selection_on_screen() {
+        // Short list: no scrolling.
+        assert_eq!(window(0, 3, 10), (0, 3));
+        // Selection past the bottom scrolls just far enough.
+        assert_eq!(window(12, 40, 10), (3, 13));
+        // Selection near the top does not scroll.
+        assert_eq!(window(2, 40, 10), (0, 10));
+        // Never scrolls past the end.
+        assert_eq!(window(39, 40, 10), (30, 40));
+        assert_eq!(window(0, 0, 10), (0, 0));
+    }
+
+    #[test]
+    fn a_long_list_scrolls_to_the_selection() {
+        let items: Vec<StoreItem> = (0..60)
+            .map(|i| item(&format!("pkg-{i:02}"), false))
+            .collect();
+        let hijacked = HashSet::new();
+        let report = empty_report();
+        let mut snapshot = base(&items, &hijacked, &report);
+        snapshot.selected = 55;
+        let out = render(&snapshot);
+
+        assert!(out.contains("pkg-55"), "selection must be visible:\n{out}");
+        assert!(
+            !out.contains("pkg-00"),
+            "should have scrolled past the top:\n{out}"
+        );
     }
 
     #[test]

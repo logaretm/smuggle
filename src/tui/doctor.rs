@@ -38,6 +38,18 @@ pub struct Report {
 }
 
 impl Report {
+    /// Shown until the first real report arrives. Building one shells out to
+    /// npm, launchctl and security, which is far too slow to do on the event
+    /// loop, so it happens on a worker thread.
+    pub fn pending() -> Self {
+        Self {
+            machine: vec![Check::new(Level::Ok, "checking…", "")],
+            project: Vec::new(),
+        }
+    }
+}
+
+impl Report {
     pub fn worst(&self) -> Level {
         let mut levels = self.machine.iter().chain(&self.project).map(|c| c.level);
         if levels.clone().any(|l| l == Level::Bad) {

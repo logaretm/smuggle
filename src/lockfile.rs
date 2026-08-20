@@ -359,7 +359,8 @@ pub fn reconcile() {
     }
 }
 
-/// Run the consumer's package manager so the pin takes effect.
+/// Run the consumer's package manager so the pin takes effect, letting its
+/// output through to the terminal.
 pub fn install(consumer_dir: &Path, kind: Kind) -> Result<(), String> {
     let (program, args) = kind.command();
 
@@ -368,13 +369,7 @@ pub fn install(consumer_dir: &Path, kind: Kind) -> Result<(), String> {
         style(format!("{program} {}", args.join(" "))).cyan()
     ));
 
-    // Node ignores the macOS keychain, so the package manager has to be told
-    // about our CA. Setting it here rather than relying on the shell profile
-    // means setup takes effect immediately, with no terminal restart.
-    let status = std::process::Command::new(program)
-        .args(args)
-        .current_dir(consumer_dir)
-        .env("NODE_EXTRA_CA_CERTS", ca::cert_path())
+    let status = command(consumer_dir, kind)
         .status()
         .map_err(|e| format!("failed to run `{program}`: {e}"))?;
 
@@ -382,6 +377,46 @@ pub fn install(consumer_dir: &Path, kind: Kind) -> Result<(), String> {
         return Err(format!("`{program} {}` failed", args.join(" ")));
     }
     Ok(())
+}
+
+/// As [`install`], but capturing the package manager's output instead of
+/// letting it reach the terminal, and returning it line by line.
+///
+/// A UI owns the screen: anything the package manager printed itself would be
+/// drawn over the frame and corrupt it.
+pub fn install_captured(consumer_dir: &Path, kind: Kind) -> Result<Vec<String>, String> {
+    let (program, args) = kind.command();
+
+    let output = command(consumer_dir, kind)
+        .output()
+        .map_err(|e| format!("failed to run `{program}`: {e}"))?;
+
+    let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .chain(String::from_utf8_lossy(&output.stderr).lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    if !output.status.success() {
+        let reason = lines.last().cloned().unwrap_or_default();
+        return Err(format!("`{program} {}` failed: {reason}", args.join(" ")));
+    }
+    Ok(lines)
+}
+
+fn command(consumer_dir: &Path, kind: Kind) -> std::process::Command {
+    let (program, args) = kind.command();
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .current_dir(consumer_dir)
+        // Node ignores the macOS keychain, so the package manager has to be
+        // told about our CA. Setting it here rather than relying on the shell
+        // profile means setup takes effect immediately, with no restart.
+        .env("NODE_EXTRA_CA_CERTS", ca::cert_path());
+    command
 }
 
 #[cfg(test)]

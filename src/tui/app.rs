@@ -19,6 +19,9 @@ use super::store_view::{self, StoreItem};
 /// growing without bound over a long session.
 const ACTIVITY_LIMIT: usize = 500;
 
+/// More than any panel is tall, and far less than the backlog.
+const VISIBLE_ACTIVITY: usize = 100;
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum View {
     Session,
@@ -39,8 +42,10 @@ impl View {
 /// Work that must not block the event loop.
 pub enum Work {
     /// The registration changed; re-pin and reinstall.
-    Applied(Result<String, String>),
+    Applied(Result<Vec<String>, String>),
     Repacked(Result<String, String>),
+    /// A fresh diagnostics report, built off the event loop.
+    Doctor(Box<doctor::Report>),
 }
 
 pub struct App {
@@ -72,9 +77,8 @@ impl App {
         pin: lockfile::Pin,
     ) -> Self {
         let (work_tx, work_rx) = channel();
-        let report = doctor::run(&consumer_dir, None);
 
-        Self {
+        let app = Self {
             consumer_dir,
             view: View::Session,
             selected: 0,
@@ -82,7 +86,7 @@ impl App {
             hijacked: HashSet::new(),
             activity: VecDeque::new(),
             status: None,
-            report,
+            report: doctor::Report::pending(),
             busy: None,
             error: None,
             should_quit: false,
@@ -91,7 +95,21 @@ impl App {
             lock,
             work_tx,
             work_rx,
-        }
+        };
+        app.refresh_report();
+        app
+    }
+
+    /// Rebuild diagnostics on a worker thread. Every check shells out, so
+    /// doing this inline would stall the frame for hundreds of milliseconds.
+    pub fn refresh_report(&self) {
+        let dir = self.consumer_dir.clone();
+        let status = self.status.clone();
+        let tx = self.work_tx.clone();
+        std::thread::spawn(move || {
+            let report = doctor::run(&dir, status.as_ref());
+            let _ = tx.send(Work::Doctor(Box::new(report)));
+        });
     }
 
     /// The data the UI draws from, with the live handles left behind.
@@ -102,7 +120,14 @@ impl App {
             selected: self.selected,
             items: &self.items,
             hijacked: &self.hijacked,
-            activity: self.activity.iter().cloned().collect(),
+            // Only what a panel could show. Cloning the whole backlog every
+            // frame would copy hundreds of strings several times a second.
+            activity: self
+                .activity
+                .iter()
+                .take(VISIBLE_ACTIVITY)
+                .cloned()
+                .collect(),
             registries: self
                 .status
                 .as_ref()
@@ -144,10 +169,9 @@ impl App {
             }
             Reply::Log { line } => self.push_activity(line),
             Reply::Error { message } => self.error = Some(message),
-            Reply::Status { status } => {
-                self.report = doctor::run(&self.consumer_dir, Some(&status));
-                self.status = Some(status);
-            }
+            // Status arrives on a timer. Rebuilding diagnostics here would
+            // shell out to npm, launchctl and security twice a second.
+            Reply::Status { status } => self.status = Some(status),
             Reply::Ok => {}
         }
     }
@@ -203,10 +227,7 @@ impl App {
         let kind = self.lock.kind;
         let tx = self.work_tx.clone();
         std::thread::spawn(move || {
-            let result = lockfile::install(&dir, kind)
-                .map(|()| "install finished".to_string())
-                .map_err(|e| e.to_string());
-            let _ = tx.send(Work::Applied(result));
+            let _ = tx.send(Work::Applied(lockfile::install_captured(&dir, kind)));
         });
     }
 
@@ -258,9 +279,29 @@ impl App {
     }
 
     pub fn on_work(&mut self, work: Work) {
-        self.busy = None;
+        // Diagnostics arrive independently of whatever the user asked for, so
+        // they must not clear a running install's indicator.
+        if !matches!(work, Work::Doctor(_)) {
+            self.busy = None;
+        }
+
         match work {
-            Work::Applied(Ok(line)) => self.push_activity(line),
+            Work::Doctor(report) => self.report = *report,
+            Work::Applied(Ok(output)) => {
+                // The package manager's own output would corrupt the frame if
+                // it reached the terminal, so it is folded into the feed.
+                let summary = output
+                    .iter()
+                    .rev()
+                    .find(|l| {
+                        l.contains("packages in")
+                            || l.contains("up to date")
+                            || l.starts_with("Done in")
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| "install finished".to_string());
+                self.push_activity(summary);
+            }
             Work::Repacked(Ok(name)) => {
                 self.items = store_view::load();
                 self.push_activity(format!("repacked {name}"));
@@ -275,7 +316,7 @@ impl App {
 
     pub fn refresh(&mut self) {
         self.items = store_view::load();
-        self.report = doctor::run(&self.consumer_dir, self.status.as_ref());
+        self.refresh_report();
     }
 
     /// End the session the way ctrl-c does: unpin, stop interception, and put

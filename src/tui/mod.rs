@@ -73,10 +73,19 @@ fn event_loop(
             .draw(|frame| view::draw(frame, &app.snapshot()))
             .map_err(|e| format!("draw failed: {e}"))?;
 
+        // Drain everything queued before drawing again. Handling one key per
+        // frame makes held arrow keys crawl, since each repeat then waits for
+        // a full redraw.
         if event::poll(TICK).map_err(|e| format!("input failed: {e}"))? {
-            if let Ok(event::Event::Key(key)) = event::read() {
-                if key.kind == KeyEventKind::Press {
-                    handle_key(app, key.code, key.modifiers);
+            loop {
+                if let Ok(event::Event::Key(key)) = event::read() {
+                    if key.kind == KeyEventKind::Press {
+                        handle_key(app, key.code, key.modifiers);
+                    }
+                }
+                match event::poll(Duration::ZERO) {
+                    Ok(true) => continue,
+                    _ => break,
                 }
             }
         }

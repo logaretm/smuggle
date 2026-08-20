@@ -144,9 +144,11 @@ fn serve_session(stream: UnixStream, state: Shared, owner_uid: u32) {
         }
     };
 
-    // Events are pushed from the proxy-reading thread, so the connection gets
-    // its own channel rather than being written to from there directly.
+    // Everything the daemon sends after the first reply goes through this
+    // channel, so exactly one thread ever writes to the socket. Two writers
+    // would interleave and corrupt the stream.
     let (events, incoming) = channel::<Reply>();
+    let acks = events.clone();
     let id = {
         let mut state = state.lock().unwrap();
         let id = state.next_id;
@@ -183,11 +185,43 @@ fn serve_session(stream: UnixStream, state: Shared, owner_uid: u32) {
         }
     });
 
-    // The session holds the connection open. Reading to EOF is how we learn it
-    // is gone, whether it exited cleanly or was killed.
-    let mut sink = String::new();
-    while matches!(reader.read_line(&mut sink), Ok(n) if n > 0) {
-        sink.clear();
+    // The session holds the connection open. Further lines re-register it,
+    // which is how a session changes what it hijacks without dropping the
+    // connection and making the proxy flap. Reading to EOF is how we learn the
+    // session is gone, whether it exited cleanly or was killed.
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+
+        let Ok(Request::Register {
+            packages,
+            registries,
+            verbose,
+            ..
+        }) = serde_json::from_str::<Request>(line.trim())
+        else {
+            continue;
+        };
+
+        {
+            let mut guard = state.lock().unwrap();
+            if let Some(session) = guard.sessions.get_mut(&id) {
+                session.packages = packages;
+                session.registries = registries;
+                session.verbose = verbose;
+            }
+        }
+
+        let reply = match resync(&state, owner_uid) {
+            Ok(()) => Reply::Ok,
+            Err(message) => Reply::Error { message },
+        };
+        if acks.send(reply).is_err() {
+            break;
+        }
     }
 
     drop_session(&state, id, owner_uid);

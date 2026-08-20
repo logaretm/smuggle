@@ -2,7 +2,7 @@
 name = "smuggle"
 version = "0.3.0"
 edition = "2024"
-description = "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution"
+description = "Test your local npm packages in a real project, without npm link"
 license = "MIT"
 keywords = ["npm", "pnpm", "yarn", "local", "publish"]
 categories = ["command-line-utilities", "development-tools"]

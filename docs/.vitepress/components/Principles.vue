@@ -1,12 +1,12 @@
 <script setup>
 const ITEMS = [
-  { glyph: "links", title: "No symlinks", body: "Packages are real files in node_modules — bundlers, Vite, and Node treat them like any other install." },
-  { glyph: "lock", title: "No lockfile changes", body: "pnpm-lock.yaml, package-lock.json, yarn.lock — never touched. Nothing to revert." },
-  { glyph: "registry", title: "No .npmrc tweaks", body: "No registry overrides, no scoped resolution rules." },
-  { glyph: "json", title: "No package.json edits", body: "Version ranges are preserved. New packages are injected temporarily and reverted on exit." },
-  { glyph: "broom", title: "Automatic cleanup", body: "Originals are restored on exit, even on Ctrl-C." },
-  { glyph: "hash", title: "Hash-based change detection", body: "Cache busts and Vite restarts only when the packed output actually changes." },
-  { glyph: "graph", title: "Workspace aware", body: "Detects pnpm workspaces and scans all member packages for matches." },
+  { glyph: "registry", title: "A real install", body: "Requests are answered from your machine, but resolution, download and install all happen exactly as they normally would." },
+  { glyph: "links", title: "No symlinks", body: "Your package manager unpacks the tarball itself, so node_modules holds real files that bundlers and Node treat like any other dependency." },
+  { glyph: "hash", title: "Caches cannot hide it", body: "The integrity in your lockfile is rewritten to your build. A hash nothing has ever seen cannot come from a cache, so the fetch has to go out." },
+  { glyph: "lock", title: "Lockfile put back", body: "Pinned while a session runs, restored when it ends, and repaired on the next run if a session was killed outright." },
+  { glyph: "json", title: "No package.json edits", body: "Version ranges are preserved. Smuggle never writes to your manifest." },
+  { glyph: "broom", title: "Nothing outlives the session", body: "Interception lasts exactly as long as the command runs. Quitting removes the redirect and reinstalls the published packages." },
+  { glyph: "graph", title: "Transitive packages follow", body: "If a package you are serving depends on another one you have published, both are served." },
 ];
 </script>
 

@@ -2,7 +2,7 @@
   "name": "smuggle-cli",
   "version": "0.3.0",
   "type": "module",
-  "description": "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
+  "description": "Test your local npm packages in a real project, without npm link",
   "license": "MIT",
   "author": "Abdelrahman Awad <me@awad.dev>",
   "repository": {

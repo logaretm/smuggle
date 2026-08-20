@@ -1,6 +1,6 @@
 {
   "name": "smuggle",
-  "description": "Test local npm packages in real consumer projects — no symlinks, no lockfile pollution",
+  "description": "Test your local npm packages in a real project, without npm link",
   "version": "1.0.0",
   "author": {
     "name": "logaretm"

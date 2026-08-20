@@ -1,10 +1,12 @@
 <script setup>
 const COMMANDS = [
-  { id: "publish", name: "smuggle publish", blurb: "Pack and register local packages.", blocking: false, anchor: "smuggle-publish" },
-  { id: "install", name: "smuggle install", aka: "smuggle", blurb: "Swap registered packages into node_modules.", blocking: true, anchor: "smuggle-install" },
-  { id: "dev", name: "smuggle dev", blurb: "Swap packages and run your dev server.", blocking: true, anchor: "smuggle-dev" },
+  { id: "setup", name: "smuggle setup", blurb: "Install the local CA and background daemon. Once per machine.", blocking: false, anchor: "smuggle-setup" },
+  { id: "publish", name: "smuggle publish", blurb: "Pack and register a local package.", blocking: false, anchor: "smuggle-publish" },
+  { id: "hijack", name: "smuggle hijack", aka: "smuggle", blurb: "Serve registered packages to this project.", blocking: true, anchor: "smuggle-hijack" },
+  { id: "ui", name: "smuggle ui", blurb: "The same session, in a terminal UI.", blocking: true, anchor: "smuggle-ui" },
   { id: "list", name: "smuggle list", blurb: "List all registered packages.", blocking: false, anchor: "smuggle-list" },
   { id: "unpublish", name: "smuggle unpublish", blurb: "Remove a registered package.", blocking: false, anchor: "smuggle-unpublish" },
+  { id: "cleanup", name: "smuggle cleanup", blurb: "Remove the CA, the daemon, and any leftover redirect.", blocking: false, anchor: "smuggle-cleanup" },
 ];
 </script>
 

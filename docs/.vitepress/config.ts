@@ -5,7 +5,6 @@ import path from "node:path";
 const DOCS_ORDER = [
   { path: "guide/getting-started.md", title: "Getting Started" },
   { path: "guide/why.md", title: "Why Smuggle?" },
-  { path: "guide/ci.md", title: "CI / Non-Interactive Usage" },
   { path: "reference/commands.md", title: "Commands" },
   { path: "reference/flags.md", title: "Flags" },
 ];
@@ -20,7 +19,7 @@ function generateLlmsTxt(siteConfig: { outDir: string; srcDir: string }) {
   const index = [
     "# Smuggle",
     "",
-    "> Smuggle local npm packages into your projects — no symlinks, no lockfile pollution.",
+    "> Test your local npm packages in a real project, without npm link.",
     "",
     "## Docs",
     "",
@@ -45,7 +44,7 @@ const SITE_URL = "https://awad.dev/smuggle";
 const OG_IMAGE = `${SITE_URL}/og.png`;
 const SITE_TITLE = "Smuggle";
 const SITE_DESCRIPTION =
-  "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution";
+  "Test your local npm packages in a real project, without npm link";
 
 export default defineConfig({
   base: "/smuggle/",
@@ -142,7 +141,6 @@ export default defineConfig({
         items: [
           { text: "Why Smuggle?", link: "/guide/why" },
           { text: "Getting Started", link: "/guide/getting-started" },
-          { text: "CI / Non-Interactive Usage", link: "/guide/ci" },
         ],
       },
       {

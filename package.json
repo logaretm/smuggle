@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.34.4",
-  "description": "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
+  "description": "Test your local npm packages in a real project, without npm link",
   "main": "index.js",
   "directories": {
     "test": "tests"

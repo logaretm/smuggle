@@ -2,17 +2,20 @@
 import { ref, onMounted, onUnmounted } from "vue";
 
 const SCRIPT = [
-  { kind: "cmd", text: "cd ~/projects/my-package", typing: true, delay: 90 },
-  { kind: "cmd", text: "smuggle publish", typing: true, delay: 95, pause: 250 },
-  { kind: "info", text: "→ npm pack ./my-package", delay: 380 },
-  { kind: "ok", text: "✓ stored my-package@1.0.0 in ~/.smuggle", delay: 380 },
-  { kind: "blank", text: "", delay: 400 },
-  { kind: "cmd", text: "cd ~/projects/my-app", typing: true, delay: 90 },
-  { kind: "cmd", text: "smuggle install", typing: true, delay: 95, pause: 250 },
-  { kind: "muted", text: "scanning package.json…", delay: 320 },
-  { kind: "muted", text: "→ backing up node_modules/my-package", delay: 380 },
-  { kind: "ok", text: "✓ swapped my-package", delay: 380 },
-  { kind: "info", text: "↻ watching for changes…", delay: 360 },
+  { kind: "cmd", text: "smuggle setup", typing: true, delay: 95, pause: 250 },
+  { kind: "ok", text: "\u2713 trusted local CA, installed daemon", delay: 400 },
+  { kind: "blank", text: "", delay: 320 },
+  { kind: "cmd", text: "cd ~/projects/my-package", typing: true, delay: 80 },
+  { kind: "cmd", text: "smuggle publish", typing: true, delay: 95, pause: 220 },
+  { kind: "info", text: "\u2192 npm pack ./my-package", delay: 360 },
+  { kind: "ok", text: "\u2713 stored my-package@1.0.0 in ~/.smuggle", delay: 380 },
+  { kind: "blank", text: "", delay: 380 },
+  { kind: "cmd", text: "cd ~/projects/my-app", typing: true, delay: 80 },
+  { kind: "cmd", text: "smuggle", typing: true, delay: 95, pause: 250 },
+  { kind: "muted", text: "intercepting registry.npmjs.org", delay: 340 },
+  { kind: "muted", text: "pinned 1 lockfile entry", delay: 320 },
+  { kind: "info", text: "\u2192 npm install", delay: 380 },
+  { kind: "ok", text: "\u2713 served my-package from the store", delay: 420 },
 ];
 
 const lines = ref([]);
@@ -84,7 +87,7 @@ onUnmounted(() => {
         <span class="td-dot td-r" />
         <span class="td-dot td-y" />
         <span class="td-dot td-g" />
-        <span class="td-title">~ — smuggle</span>
+        <span class="td-title">~ · smuggle</span>
         <span class="td-tag">live demo</span>
       </div>
       <div class="td-body">

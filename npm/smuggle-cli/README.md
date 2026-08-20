@@ -1,12 +1,22 @@
-# smuggle
+# smuggle-cli
 
-Smuggle local npm packages into your projects — no symlinks, no lockfile pollution.
+Test your local npm packages in a real project, without npm link.
+
+[Documentation](https://awad.dev/smuggle)
 
 ## Why?
 
-Testing local packages in a real consumer project usually means `npm link`, `pnpm link`, or `file:` references. All of these pollute your lockfile, break with pnpm's content-addressable store, or behave differently from a real install.
+Testing a local package in a real consumer project usually means `npm link`, `pnpm link`, `yalc`, or a `file:` reference. Symlinks confuse bundlers and break pnpm's content-addressable store, and `file:` references leave local paths in your lockfile and `package.json`.
 
-Smuggle takes a different approach: it packs your local package the same way `npm publish` would, then directly replaces the installed copy in `node_modules`. Your lockfile and `package.json` stay untouched. When you're done, originals are restored automatically.
+Smuggle takes a different route: it intercepts your package manager's registry requests and answers them with your local build. Your package manager resolves, downloads and installs exactly as it normally would. It just receives your code instead of the published tarball.
+
+That means a real install, not an imitation of one. Reinstalling does not wipe your changes, a warm cache does not quietly serve the published version, and bundlers see a genuine dependency change rather than files that appeared underneath them.
+
+## Requirements
+
+macOS. Smuggle uses launchd, the login keychain and `/etc/hosts`, so Linux and Windows are not supported yet.
+
+Lockfile pinning supports npm and pnpm. Yarn and bun are detected and reported rather than silently doing nothing.
 
 ## Install
 
@@ -32,110 +42,76 @@ brew install logaretm/tap/smuggle
 cargo install smuggle
 ```
 
-### From source
+## Setup
+
+Once per machine:
 
 ```sh
-git clone https://github.com/logaretm/smuggle.git
-cd smuggle
-cargo install --path .
+smuggle setup
+```
+
+This generates a local certificate authority, trusts it, and installs a background daemon. It asks for your password a single time. Nothing is intercepted by this step: the daemon stays inert until you start a session.
+
+To undo all of it, including anything a crashed session left behind:
+
+```sh
+smuggle cleanup
 ```
 
 ## Usage
 
-### 1. Publish local packages
+| Command | Description |
+|---------|-------------|
+| `smuggle setup` | Install the local CA and background daemon (one time) |
+| `smuggle publish` | Pack and register a local package |
+| `smuggle` or `smuggle hijack` | Serve registered packages to this project until ctrl-c |
+| `smuggle ui` | The same session, in a terminal UI |
+| `smuggle list` | List registered packages |
+| `smuggle unpublish <pkg>` | Remove a registered package |
+| `smuggle cleanup` | Remove the CA, the daemon, and any leftover redirect |
 
-In your package directory (or workspace root):
+### Register a package
+
+In your package directory, or a workspace root:
 
 ```sh
 smuggle publish
 ```
 
-This packs the package and registers it locally in `~/.smuggle/packages/`. In a pnpm workspace, you'll be prompted to select which packages to publish.
+This packs the package the same way `npm publish` would and stores the tarball in `~/.smuggle/packages/`. In a workspace you will be asked which packages to publish; `--all` skips the prompt.
 
-Use `--all` to skip the prompt and publish all non-private packages:
+### Serve it to a project
 
-```sh
-smuggle publish --all
-```
-
-### 2. Install into a consumer project
-
-In your consumer project directory:
-
-```sh
-smuggle install
-```
-
-Or just:
+In the consumer project:
 
 ```sh
 smuggle
 ```
 
-This will:
+Smuggle matches your registered packages against the project's dependencies, asks which to serve, and then holds them for as long as it runs. It pins those entries in your lockfile to your local build and runs your package manager once, so the change takes effect immediately.
 
-1. Find registered packages that match the consumer's dependencies
-2. Let you select which ones to proxy
-3. Auto-include transitive dependencies that are also registered
-4. Back up the originals from `node_modules`
-5. Extract your local packages directly into `node_modules`
-6. Clear bundler caches (Vite, Next.js, webpack) and touch `vite.config.*` to trigger a restart
-7. Watch for changes in the source packages — on change, re-pack and re-extract instantly
-8. Restore everything on exit (ctrl-c)
+Press `ctrl-c` to stop. Your lockfile is restored and the published packages are reinstalled.
 
-### 3. List registered packages
+While a session is running you can install as often as you like. Your local build is what arrives every time, because your package manager is genuinely fetching it.
 
-```sh
-smuggle list
-```
+### Iterate
 
-### 4. Remove a registered package
+Edit your package and smuggle repacks it. Run your package manager again, or use `smuggle ui` and press `space` to reinstall, and the new build lands in `node_modules`.
+
+### Terminal UI
 
 ```sh
-smuggle unpublish @scope/my-pkg
+smuggle ui
 ```
+
+Opens with nothing served. Pick packages from the list with `space` to start and stop serving them without restarting anything. Alongside the session view there is a store view for evicting and repacking what you have published, and a doctor view that checks your CA, the daemon, the redirect and which registry this project actually resolves through.
 
 ## How it works
 
-```
-smuggle publish                     smuggle install
-  |                                   |
-  v                                   v
-  Pack files (like npm publish)       Find matches in consumer deps
-  |                                   |
-  v                                   v
-  Store tarball in ~/.smuggle/        Backup node_modules originals
-                                      |
-                                      v
-                                      Extract tarball into node_modules
-                                      |
-                                      v
-                                      Watch source dirs for changes
-                                      |
-                                      v
-                                      On change: re-pack -> hash check
-                                      -> extract if changed -> bust caches
-                                      |
-                                      v
-                                      On exit: restore originals
-```
+`smuggle setup` installs a certificate authority and a root daemon. The daemon does nothing until a session registers with it.
 
-Key design decisions:
+Starting a session points the registry hostnames at a local address through `/etc/hosts` and stands up a proxy holding a certificate your machine trusts. Requests for packages you are serving are answered from `~/.smuggle`; everything else is forwarded upstream untouched.
 
-- **No symlinks** — packages are real files in `node_modules`, just like a normal install
-- **No lockfile changes** — your `pnpm-lock.yaml` / `package-lock.json` / `yarn.lock` stays untouched
-- **No `.npmrc` changes** — no registry overrides needed
-- **No `package.json` changes** — version ranges are preserved
-- **Automatic cleanup** — originals are restored on exit, even on ctrl-c
-- **Hash-based change detection** — only triggers cache busting and Vite restarts when the packed output actually changes
-- **Workspace support** — detects pnpm workspaces and scans all member packages for matching dependencies
+Package managers are content addressed, so smuggle also rewrites the integrity hash of those packages in your lockfile. That is what makes a warm cache miss: a hash nothing has ever seen cannot be served from a cache, so the fetch has to go out, and it reaches the proxy. This is why you never need to clear a cache by hand.
 
-## Supported package managers
-
-- pnpm (including workspaces)
-- npm
-- yarn
-
-## License
-
-MIT
+The redirect exists only while a session runs. Ending one removes it, restores the lockfile and reinstalls the published packages. A session killed outright is cleaned up the next time you run smuggle.

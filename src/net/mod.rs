@@ -46,5 +46,117 @@ fn home_of(user: &str) -> Option<PathBuf> {
 /// runs (see [`loopback`]).
 pub const LISTEN_IP: &str = "127.0.0.2";
 
-/// Registry hosts intercepted by default.
-pub const DEFAULT_REGISTRY_HOSTS: &[&str] = &["registry.npmjs.org", "registry.yarnpkg.com"];
+/// Registry URLs intercepted when none are detected or given.
+pub const DEFAULT_REGISTRIES: &[&str] = &[
+    "https://registry.npmjs.org/",
+    "https://registry.yarnpkg.com/",
+];
+
+/// A registry to intercept.
+///
+/// Corporate registries are often mounted under a path, as in
+/// `https://host/npm/`. Requests then arrive as `/npm/@scope%2fname`, so the
+/// prefix has to come off before a path can be read as a package name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Registry {
+    pub host: String,
+    pub prefix: String,
+}
+
+impl Registry {
+    /// Parse a registry URL. Accepts a bare host for convenience.
+    pub fn parse(url: &str) -> Result<Self, String> {
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .unwrap_or(url);
+
+        let (authority, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, ""),
+        };
+
+        // Credentials and ports are not part of the name we redirect.
+        let host = authority
+            .rsplit('@')
+            .next()
+            .unwrap_or(authority)
+            .split(':')
+            .next()
+            .unwrap_or(authority);
+
+        if host.is_empty() {
+            return Err(format!("{url} has no host"));
+        }
+
+        Ok(Self {
+            host: host.to_string(),
+            prefix: path.trim_end_matches('/').to_string(),
+        })
+    }
+
+    /// Strip this registry's mount path from a request path, so what remains
+    /// can be read as a package route. Returns None when the path is outside
+    /// the mount.
+    pub fn strip_prefix<'a>(&self, path: &'a str) -> Option<&'a str> {
+        if self.prefix.is_empty() {
+            return Some(path);
+        }
+        match path.strip_prefix(&self.prefix) {
+            Some("") => Some("/"),
+            Some(rest) if rest.starts_with('/') => Some(rest),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_plain_registry() {
+        let r = Registry::parse("https://registry.npmjs.org/").unwrap();
+        assert_eq!(r.host, "registry.npmjs.org");
+        assert_eq!(r.prefix, "");
+    }
+
+    #[test]
+    fn parses_a_mounted_registry() {
+        let r = Registry::parse("https://sfw.security.sentry.io/npm/").unwrap();
+        assert_eq!(r.host, "sfw.security.sentry.io");
+        assert_eq!(r.prefix, "/npm");
+    }
+
+    #[test]
+    fn drops_credentials_and_port() {
+        let r = Registry::parse("https://user:pass@host.example:8080/npm/").unwrap();
+        assert_eq!(r.host, "host.example");
+        assert_eq!(r.prefix, "/npm");
+    }
+
+    #[test]
+    fn accepts_a_bare_host() {
+        let r = Registry::parse("registry.npmjs.org").unwrap();
+        assert_eq!(r.host, "registry.npmjs.org");
+        assert_eq!(r.prefix, "");
+    }
+
+    #[test]
+    fn strips_the_mount_path() {
+        let r = Registry::parse("https://host/npm/").unwrap();
+        assert_eq!(
+            r.strip_prefix("/npm/@sentry%2fbrowser"),
+            Some("/@sentry%2fbrowser")
+        );
+        assert_eq!(r.strip_prefix("/npm"), Some("/"));
+        // Outside the mount: not a package route for this registry.
+        assert_eq!(r.strip_prefix("/other/thing"), None);
+    }
+
+    #[test]
+    fn an_unmounted_registry_passes_paths_through() {
+        let r = Registry::parse("https://registry.npmjs.org/").unwrap();
+        assert_eq!(r.strip_prefix("/is-number"), Some("/is-number"));
+    }
+}

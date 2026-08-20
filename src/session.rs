@@ -30,8 +30,42 @@ impl Drop for Proxy {
     }
 }
 
+/// Ask npm which registries this project actually resolves through.
+///
+/// A configured registry is easy to miss: npm reads `.npmrc` from the project,
+/// the user's home, and the npm prefix, and a corporate mirror there means
+/// registry.npmjs.org is never contacted at all. Asking npm is the only way to
+/// see the same answer it will use.
+pub fn detect_registries(consumer_dir: &Path) -> Vec<String> {
+    let Ok(output) = Command::new("npm")
+        .args(["config", "list", "--json"])
+        .current_dir(consumer_dir)
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    let Ok(config) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return Vec::new();
+    };
+    let Some(map) = config.as_object() else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<String> = map
+        .iter()
+        .filter(|(key, _)| *key == "registry" || key.ends_with(":registry"))
+        .filter_map(|(_, value)| value.as_str())
+        .map(str::to_string)
+        .collect();
+
+    found.sort();
+    found.dedup();
+    found
+}
+
 /// Start the proxy with `packages` hijacked, prompting for sudo if needed.
-pub fn start(packages: &[String], verbose: bool) -> Result<Proxy, String> {
+pub fn start(packages: &[String], registries: &[String], verbose: bool) -> Result<Proxy, String> {
     let exe =
         std::env::current_exe().map_err(|e| format!("could not locate the smuggle binary: {e}"))?;
 
@@ -41,6 +75,9 @@ pub fn start(packages: &[String], verbose: bool) -> Result<Proxy, String> {
     command.arg("-n").arg(&exe).arg("proxy");
     for name in packages {
         command.arg("--hijack").arg(name);
+    }
+    for registry in registries {
+        command.arg("--registry").arg(registry);
     }
     if verbose {
         command.arg("--verbose");
@@ -91,6 +128,7 @@ pub fn run(
     consumer_dir: &Path,
     select_all: bool,
     names: &[String],
+    extra_registries: &[String],
     verbose: bool,
 ) -> Result<(), String> {
     let consumer_dir = consumer_dir
@@ -103,7 +141,8 @@ pub fn run(
     let names: Vec<String> = selected.iter().map(|e| e.name.clone()).collect();
     let refs: Vec<&store::StoreEntry> = selected.iter().collect();
 
-    let _proxy = start(&names, verbose)?;
+    let registries = resolve_registries(&consumer_dir, extra_registries);
+    let _proxy = start(&names, &registries, verbose)?;
 
     let _ = cliclack::log::success(format!(
         "Hijacking {}",
@@ -122,6 +161,26 @@ pub fn run(
 
     let _ = cliclack::outro("Stopped. Nothing is intercepted any more.");
     Ok(())
+}
+
+/// The registries to intercept: whatever npm is configured to use, plus the
+/// public defaults so a project that switches registries mid-session, or pulls
+/// a scoped package from elsewhere, is still covered.
+fn resolve_registries(consumer_dir: &Path, extra: &[String]) -> Vec<String> {
+    let detected = detect_registries(consumer_dir);
+
+    for url in &detected {
+        if !url.contains("registry.npmjs.org") {
+            let _ = cliclack::log::info(format!("npm is configured to use {}", style(url).cyan()));
+        }
+    }
+
+    let mut all = detected;
+    all.extend(extra.iter().cloned());
+    all.extend(crate::net::DEFAULT_REGISTRIES.iter().map(|r| r.to_string()));
+    all.sort();
+    all.dedup();
+    all
 }
 
 /// Resolve which registered packages this session should answer for.

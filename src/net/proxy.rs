@@ -25,7 +25,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
-use super::{ca, hijack, hosts, loopback};
+use super::{Registry, ca, hijack, hosts, loopback};
 use crate::store;
 
 /// Hop-by-hop headers, which must not be forwarded across a proxy hop.
@@ -51,7 +51,7 @@ type UpstreamClient = hyper_util::client::legacy::Client<
 pub struct Config {
     pub listen_ip: IpAddr,
     pub port: u16,
-    pub hosts: Vec<String>,
+    pub registries: Vec<super::Registry>,
     /// Listen without editing `/etc/hosts`. Nothing is intercepted, so this is
     /// only useful for pointing a client at the proxy explicitly.
     pub no_redirect: bool,
@@ -79,7 +79,11 @@ pub fn run(config: Config) -> Result<(), String> {
 
     // Resolve upstreams before the redirect exists, otherwise these lookups
     // would come straight back to us.
-    let upstreams = resolve_upstreams(&config.hosts)?;
+    let mut registry_hosts: Vec<String> =
+        config.registries.iter().map(|r| r.host.clone()).collect();
+    registry_hosts.sort();
+    registry_hosts.dedup();
+    let upstreams = resolve_upstreams(&registry_hosts)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -89,7 +93,7 @@ pub fn run(config: Config) -> Result<(), String> {
     // The listen address needs to exist on lo0 before we can bind it.
     let owns_alias = loopback::add_alias(config.listen_ip)?;
 
-    let result = runtime.block_on(serve(&config, upstreams));
+    let result = runtime.block_on(serve(&config, &registry_hosts, upstreams));
 
     if owns_alias {
         if let Err(e) = loopback::remove_alias(config.listen_ip) {
@@ -131,7 +135,11 @@ fn resolve_upstreams(hosts: &[String]) -> Result<HashMap<String, Vec<SocketAddr>
     Ok(map)
 }
 
-async fn serve(config: &Config, upstreams: HashMap<String, Vec<SocketAddr>>) -> Result<(), String> {
+async fn serve(
+    config: &Config,
+    registry_hosts: &[String],
+    upstreams: HashMap<String, Vec<SocketAddr>>,
+) -> Result<(), String> {
     let addr = SocketAddr::new(config.listen_ip, config.port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -141,22 +149,29 @@ async fn serve(config: &Config, upstreams: HashMap<String, Vec<SocketAddr>>) -> 
     let client = Arc::new(upstream_client(upstreams));
     let hijacked: Arc<std::collections::HashSet<String>> =
         Arc::new(config.hijack.iter().cloned().collect());
+    let mounts: Arc<HashMap<String, Registry>> = Arc::new(
+        config
+            .registries
+            .iter()
+            .map(|r| (r.host.clone(), r.clone()))
+            .collect(),
+    );
 
     if config.no_redirect {
         let _ = cliclack::log::info(format!(
             "Serving {} on {} without a redirect — nothing is intercepted",
-            style(config.hosts.join(", ")).cyan(),
+            style(registry_hosts.join(", ")).cyan(),
             style(addr).dim(),
         ));
     } else {
         hosts::install(
             std::process::id() as i32,
             &config.listen_ip.to_string(),
-            &config.hosts,
+            registry_hosts,
         )?;
         let _ = cliclack::log::success(format!(
             "Intercepting {} on {}",
-            style(config.hosts.join(", ")).cyan(),
+            style(registry_hosts.join(", ")).cyan(),
             style(addr).dim(),
         ));
     }
@@ -173,8 +188,11 @@ async fn serve(config: &Config, upstreams: HashMap<String, Vec<SocketAddr>>) -> 
                 let tls = tls.clone();
                 let client = client.clone();
                 let hijacked = hijacked.clone();
+                let mounts = mounts.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, tls, client, hijacked, verbose).await {
+                    if let Err(e) =
+                        handle_connection(stream, tls, client, hijacked, mounts, verbose).await
+                    {
                         if verbose {
                             let _ = cliclack::log::warning(e);
                         }
@@ -226,6 +244,7 @@ async fn handle_connection(
     tls: Arc<tokio_rustls::TlsAcceptor>,
     client: Arc<UpstreamClient>,
     hijacked: Arc<std::collections::HashSet<String>>,
+    mounts: Arc<HashMap<String, Registry>>,
     verbose: bool,
 ) -> Result<(), String> {
     let stream = tls
@@ -247,7 +266,8 @@ async fn handle_connection(
         let client = client.clone();
         let sni = sni.clone();
         let hijacked = hijacked.clone();
-        async move { forward(req, sni, client, hijacked, verbose).await }
+        let mounts = mounts.clone();
+        async move { forward(req, sni, client, hijacked, mounts, verbose).await }
     });
 
     hyper::server::conn::http1::Builder::new()
@@ -262,6 +282,7 @@ async fn forward(
     host: String,
     client: Arc<UpstreamClient>,
     hijacked: Arc<std::collections::HashSet<String>>,
+    mounts: Arc<HashMap<String, Registry>>,
     verbose: bool,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     let path = req
@@ -271,8 +292,14 @@ async fn forward(
         .unwrap_or("/")
         .to_string();
 
+    // Registries mounted under a path serve packages below it, so the mount
+    // has to come off before the rest can be read as a package route.
+    let route_path = mounts
+        .get(&host)
+        .and_then(|registry| registry.strip_prefix(&path));
+
     // Decide up front whether this request belongs to a package we answer for.
-    let target = match hijack::parse_route(&path) {
+    let target = match route_path.map_or(hijack::Route::Other, hijack::parse_route) {
         hijack::Route::Tarball(name) if hijacked.contains(&name) => Some((name, Kind::Tarball)),
         hijack::Route::Packument(name) if hijacked.contains(&name) => Some((name, Kind::Packument)),
         hijack::Route::Manifest(name) if hijacked.contains(&name) => Some((name, Kind::Manifest)),

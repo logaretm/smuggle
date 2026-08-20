@@ -41,6 +41,10 @@ struct Cli {
     /// Log every request the proxy handles, not just hijacked ones
     #[arg(long, short, global = true)]
     verbose: bool,
+
+    /// Registry URL to intercept on top of the ones npm reports. Repeatable.
+    #[arg(long = "registry", global = true)]
+    registries: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -91,10 +95,6 @@ enum Commands {
 
     /// Run the interception proxy in the foreground until ctrl-c (needs sudo)
     Proxy {
-        /// Registry host to intercept. Repeatable. Defaults to the npm and yarn registries.
-        #[arg(long = "host")]
-        hosts: Vec<String>,
-
         /// Port to listen on (default 443)
         #[arg(long, default_value_t = 443)]
         port: u16,
@@ -152,6 +152,7 @@ fn main() {
             &path.or(cli.path).unwrap_or_else(cwd),
             hijack_all || all,
             &names,
+            &cli.registries,
             cli.verbose,
         ),
         Some(Commands::List) => {
@@ -166,7 +167,6 @@ fn main() {
         Some(Commands::Cleanup) => setup::cmd_cleanup(),
         Some(Commands::HostsClear) => net::hosts::remove(),
         Some(Commands::Proxy {
-            hosts,
             port,
             listen,
             no_redirect,
@@ -174,13 +174,24 @@ fn main() {
             hijack,
             exit_on_parent_close,
         }) => {
-            let hosts = if hosts.is_empty() {
-                net::DEFAULT_REGISTRY_HOSTS
+            let sources: Vec<String> = if cli.registries.is_empty() {
+                net::DEFAULT_REGISTRIES
                     .iter()
-                    .map(|h| h.to_string())
+                    .map(|r| r.to_string())
                     .collect()
             } else {
-                hosts
+                cli.registries.clone()
+            };
+            let registries = match sources
+                .iter()
+                .map(|url| net::Registry::parse(url))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    let _ = cliclack::outro(format!("{}", style(&e).red()));
+                    std::process::exit(1);
+                }
             };
             net::proxy::run(net::proxy::Config {
                 listen_ip: listen.unwrap_or_else(|| {
@@ -189,7 +200,7 @@ fn main() {
                         .expect("LISTEN_IP is a valid address")
                 }),
                 port,
-                hosts,
+                registries,
                 no_redirect,
                 verbose,
                 hijack,
@@ -197,7 +208,13 @@ fn main() {
             })
         }
         // bare `smuggle` or `smuggle <names>` is the same as `smuggle hijack`
-        None => session::run(&cli.path.unwrap_or_else(cwd), all, &cli.names, cli.verbose),
+        None => session::run(
+            &cli.path.unwrap_or_else(cwd),
+            all,
+            &cli.names,
+            &cli.registries,
+            cli.verbose,
+        ),
     };
 
     if let Err(e) = result {

@@ -40,7 +40,16 @@ fn parse_block(contents: &str) -> Option<Block> {
 
 /// True when a process with this pid is running.
 pub fn pid_alive(pid: i32) -> bool {
-    pid > 0 && unsafe { libc::kill(pid, 0) } == 0
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we may not signal it. That is the
+    // normal case here: the proxy runs as root and we do not. Only ESRCH means
+    // it is actually gone.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Point `hosts` at the daemon's listen address, tagging the block with `pid`.
@@ -181,5 +190,19 @@ mod tests {
     #[test]
     fn our_own_pid_is_alive() {
         assert!(pid_alive(std::process::id() as i32));
+    }
+
+    #[test]
+    fn a_process_we_cannot_signal_still_counts_as_alive() {
+        // launchd is pid 1 and root-owned, so kill(1, 0) fails with EPERM for
+        // an unprivileged caller. Treating that as dead would have smuggle
+        // tear down the redirect of a running root proxy.
+        assert!(pid_alive(1));
+    }
+
+    #[test]
+    fn an_unused_pid_is_dead() {
+        // Above the default kern.maxproc pid range, so nothing can hold it.
+        assert!(!pid_alive(0x7fff_fffe));
     }
 }

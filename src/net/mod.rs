@@ -193,27 +193,26 @@ mod tests {
 mod home_tests {
     use super::*;
 
+    // Both cases live in one test because they mutate process-wide
+    // environment. As separate tests they race each other under the parallel
+    // runner, which fails intermittently and only on some machines.
     #[test]
-    fn an_explicit_home_wins_over_the_environment() {
-        // SAFETY: single-threaded test.
+    fn resolves_the_home_it_is_told_about() {
+        // SAFETY: the whole environment dance happens inside this one test.
         unsafe {
-            std::env::set_var(HOME_VAR, "/tmp/explicit-smuggle");
             std::env::set_var("HOME", "/var/root");
-        }
-        assert_eq!(smuggle_home(), PathBuf::from("/tmp/explicit-smuggle"));
-        unsafe { std::env::remove_var(HOME_VAR) };
-    }
+            std::env::remove_var("SUDO_USER");
 
-    #[test]
-    fn an_empty_explicit_home_is_ignored() {
-        // SAFETY: single-threaded test.
-        unsafe {
+            std::env::set_var(HOME_VAR, "/tmp/explicit-smuggle");
+            assert_eq!(smuggle_home(), PathBuf::from("/tmp/explicit-smuggle"));
+
+            // An empty override is ignored rather than resolving to nothing.
             std::env::set_var(HOME_VAR, "");
             std::env::set_var("HOME", "/tmp/fallback");
-            std::env::remove_var("SUDO_USER");
+            assert_eq!(smuggle_home(), PathBuf::from("/tmp/fallback/.smuggle"));
+
+            std::env::remove_var(HOME_VAR);
         }
-        assert_eq!(smuggle_home(), PathBuf::from("/tmp/fallback/.smuggle"));
-        unsafe { std::env::remove_var(HOME_VAR) };
     }
 
     #[test]

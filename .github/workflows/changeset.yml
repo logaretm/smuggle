@@ -1,0 +1,47 @@
+name: Changeset
+
+on:
+  # No `paths:` filter here on purpose. Every PR needs a changeset, and a
+  # workflow filtered out by paths never reports at all, which would leave a PR
+  # waiting forever on a required status that never arrives.
+  pull_request:
+
+concurrency:
+  group: changeset-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changeset:
+    # The release PR consumes changesets rather than adding one. It is opened
+    # with GITHUB_TOKEN so it does not trigger this workflow today, but do not
+    # let that be the only thing standing between it and a red check. A job
+    # skipped this way still counts as passing for the required check.
+    if: github.head_ref != 'changeset-release/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require a changeset
+        run: |
+          base="origin/${{ github.base_ref }}"
+          added=$(
+            git diff --name-only --diff-filter=A "$base...HEAD" -- '.changeset/*.md' \
+              | grep -v '^\.changeset/README\.md$' || true
+          )
+
+          if [ -n "$added" ]; then
+            echo "Found:"
+            echo "$added" | sed 's/^/  /'
+            exit 0
+          fi
+
+          echo "::error::This PR adds no changeset."
+          echo
+          echo "Run 'pnpm changeset' to describe the release, or"
+          echo "'pnpm changeset --empty' if this ships nothing user-visible."
+          echo
+          echo "One changeset covers the whole tool: the version it picks becomes"
+          echo "the crate version and every npm package version at once."
+          exit 1

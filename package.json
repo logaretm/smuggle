@@ -1,13 +1,18 @@
 {
   "name": "smuggle",
   "version": "1.0.0",
+  "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.34.4",
   "description": "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
   "main": "index.js",
   "directories": {
     "test": "tests"
   },
   "scripts": {
+    "changeset": "changeset",
+    "changeset:status": "changeset status --since=origin/main",
+    "version:packages": "changeset version && node scripts/sync-versions.ts",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"
@@ -24,6 +29,8 @@
   },
   "homepage": "https://awad.dev/smuggle/",
   "devDependencies": {
+    "@changesets/changelog-github": "^1.0.0",
+    "@changesets/cli": "^3.0.1",
     "vitepress": "^1.6.4"
   }
 }

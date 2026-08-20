@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - "v*"
+  # Called by publish.yml right after it tags the release commit, because GitHub
+  # does not fire workflows for tags pushed with GITHUB_TOKEN. `tag` is what
+  # every job checks out, so the build is pinned to the tagged commit either way.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build and release"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -30,6 +39,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -76,6 +87,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -83,13 +96,28 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # Notes come from the CHANGELOG section the release PR carried, so what
+      # npm ships, what the changelog says, and what GitHub shows all come from
+      # the same changesets. A tag cut before changesets existed, or by hand,
+      # has no matching section, so fall back to generated notes.
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          gh release create ${{ github.ref_name }} \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
+          # Everything between the first `## ` heading and the next one.
+          awk '/^## /{ n++ } n == 1' npm/smuggle-cli/CHANGELOG.md 2>/dev/null \
+            | tail -n +2 > notes.md || true
+
+          if [ -s notes.md ]; then
+            notes=(--notes-file notes.md)
+          else
+            notes=(--generate-notes)
+          fi
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            "${notes[@]}" \
             artifacts/*.tar.gz
 
   npm-publish:
@@ -101,6 +129,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - uses: actions/setup-node@v4
         with:

@@ -1,0 +1,129 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    # Changesets are what this workflow reacts to: a feature PR adding one, or
+    # the release PR removing them all. Both touch .changeset/. A src/ change
+    # without a changeset is deliberately not a release; the changeset PR check
+    # enforces that the omission was deliberate.
+    paths:
+      - '.changeset/**'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Open a release PR even with no pending changesets, using this bump'
+        type: choice
+        default: none
+        options: [none, patch, minor, major]
+
+permissions:
+  contents: write # push the release branch + tag
+  pull-requests: write # open and update the release PR
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  # Accumulates pending changesets into a "chore: release" PR carrying the
+  # version bump and the CHANGELOG entry. Merging that PR is the act of
+  # releasing; this job never publishes anything itself.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      has-changesets: ${{ steps.changesets.outputs.has-changesets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install release tooling
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Escape hatch for releasing something that merged without a changeset.
+      - name: Synthesize a changeset for a forced release
+        if: inputs.bump != '' && inputs.bump != 'none'
+        run: |
+          cat > .changeset/forced-release.md <<EOF
+          ---
+          'smuggle-cli': ${{ inputs.bump }}
+          ---
+
+          Manual release dispatched from the Actions tab.
+          EOF
+
+      # version:packages runs sync-versions.ts after `changeset version`, so the
+      # release PR bumps Cargo.toml, Cargo.lock, and the four platform packages
+      # in the same commit that bumps smuggle-cli.
+      - uses: changesets/action@v2
+        id: changesets
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          version-script: pnpm run version:packages
+          pr-title: 'chore: release'
+          commit-message: 'chore: version packages'
+        env:
+          # Read by @changesets/changelog-github to resolve PRs and authors.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Reached when main has no changesets left, which is the state the release PR
+  # merge produces. Tagging what is already committed means npm, the git tag,
+  # and the GitHub release all describe the exact commit that was reviewed.
+  tag:
+    needs: version
+    if: needs.version.outputs.has-changesets == 'false'
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Most runs land here with nothing to do (any push that only touched
+      # .changeset/ without changing the version), so this is a no-op, not a
+      # failure. It doubles as recovery: a run that failed after versioning but
+      # before publishing is fixed by re-running this job.
+      - name: Check the registry
+        id: check
+        run: |
+          version=$(jq -r .version npm/smuggle-cli/package.json)
+
+          if npm view "smuggle-cli@$version" version >/dev/null 2>&1; then
+            echo "smuggle-cli@$version is already published; nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version"
+
+      - name: Tag the release commit
+        if: steps.check.outputs.release == 'true'
+        run: |
+          git tag "${{ steps.check.outputs.tag }}"
+          git push origin "${{ steps.check.outputs.tag }}"
+
+  # Called rather than left to the tag push, because GitHub does not fire new
+  # workflows for pushes made with GITHUB_TOKEN. Passing the tag explicitly also
+  # pins the build to the commit that was just tagged, not to whatever main has
+  # drifted to since.
+  release:
+    needs: tag
+    if: needs.tag.outputs.release == 'true'
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+      id-token: write
+    with:
+      tag: ${{ needs.tag.outputs.tag }}

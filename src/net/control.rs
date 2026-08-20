@@ -30,8 +30,16 @@ pub fn is_default_socket() -> bool {
     socket_path() == Path::new(SOCKET_PATH)
 }
 
+/// Bumped whenever the wire format changes.
+///
+/// The package version alone cannot catch this: two builds of the same version
+/// can speak different protocols, and the daemon runs a staged copy that only
+/// changes when setup is re-run. Without this, a stale daemon fails to parse a
+/// newer request and reports a parse error instead of saying it is out of date.
+const PROTOCOL_REVISION: u32 = 2;
+
 pub fn version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    format!("{}+p{PROTOCOL_REVISION}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Sent once, as the first line on a connection.
@@ -175,6 +183,15 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(decoded, Request::Register { verbose: false, .. }));
+    }
+
+    #[test]
+    fn the_version_carries_the_protocol_revision() {
+        // A daemon staged from a build with a different wire format must be
+        // detected even when the package version is identical.
+        let version = version();
+        assert!(version.starts_with(env!("CARGO_PKG_VERSION")));
+        assert!(version.contains("+p"));
     }
 
     #[test]

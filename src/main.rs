@@ -7,6 +7,7 @@ mod publish;
 mod session;
 mod setup;
 mod store;
+mod tui;
 mod watch;
 mod workspace;
 
@@ -76,6 +77,13 @@ enum Commands {
         /// Skip interactive prompts and select all matching packages
         #[arg(long)]
         all: bool,
+    },
+
+    /// Open the terminal UI: pick packages to hijack, watch activity, check setup
+    Ui {
+        /// Path to the consumer project (defaults to current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
     },
 
     /// List all registered local packages (non-blocking)
@@ -179,6 +187,9 @@ fn main() {
             &cli.registries,
             cli.verbose,
         ),
+        Some(Commands::Ui { path }) => {
+            tui::run(&path.or(cli.path).unwrap_or_else(cwd), &cli.registries)
+        }
         Some(Commands::List) => {
             cmd_list();
             Ok(())

@@ -210,6 +210,22 @@ fn replace_integrity(line: &str, hash: &str) -> Option<String> {
 pub struct Pin {
     session: PathBuf,
     lockfile: PathBuf,
+    kind: Kind,
+    /// The lockfile exactly as it was found. Every rewrite starts from this
+    /// rather than from the current file, so removing a package restores its
+    /// original integrity instead of leaving the last pin in place.
+    original: String,
+}
+
+impl Pin {
+    /// Re-pin for a different set of packages. Returns how many entries are
+    /// pinned, which is zero when nothing is hijacked any more.
+    pub fn set(&self, hashes: &HashMap<String, String>) -> Result<usize, String> {
+        let (rewritten, changed) = rewrite(self.kind, &self.original, hashes)?;
+        std::fs::write(&self.lockfile, rewritten)
+            .map_err(|e| format!("could not write {}: {e}", self.lockfile.display()))?;
+        Ok(changed)
+    }
 }
 
 impl Drop for Pin {
@@ -231,14 +247,23 @@ fn session_id(lockfile: &Path) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Back up the lockfile and rewrite it to point at the tarballs we serve.
-pub fn pin(lockfile: &Lockfile, hashes: &HashMap<String, String>) -> Result<Pin, String> {
+/// Back up the lockfile so it can be rewritten and restored.
+///
+/// `require_match` rejects a pin that would change nothing, which is what a
+/// command-line session wants: it was asked for specific packages and none of
+/// them are in this project. A UI that starts with nothing hijacked pins
+/// lazily instead, so it passes false.
+pub fn pin(
+    lockfile: &Lockfile,
+    hashes: &HashMap<String, String>,
+    require_match: bool,
+) -> Result<Pin, String> {
     let original = std::fs::read_to_string(&lockfile.path)
         .map_err(|e| format!("could not read {}: {e}", lockfile.path.display()))?;
 
     let (rewritten, changed) = rewrite(lockfile.kind, &original, hashes)?;
 
-    if changed == 0 {
+    if require_match && changed == 0 {
         return Err(format!(
             "none of the selected packages appear in {}. Are they dependencies of this project?",
             lockfile.path.display()
@@ -263,23 +288,27 @@ pub fn pin(lockfile: &Lockfile, hashes: &HashMap<String, String>) -> Result<Pin,
     std::fs::write(&lockfile.path, rewritten)
         .map_err(|e| format!("could not write {}: {e}", lockfile.path.display()))?;
 
-    let _ = cliclack::log::info(format!(
-        "Pinned {} entr{} in {} to your local build",
-        style(changed).cyan(),
-        if changed == 1 { "y" } else { "ies" },
-        style(
-            lockfile
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-        )
-        .dim(),
-    ));
+    if changed > 0 {
+        let _ = cliclack::log::info(format!(
+            "Pinned {} entr{} in {} to your local build",
+            style(changed).cyan(),
+            if changed == 1 { "y" } else { "ies" },
+            style(
+                lockfile
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            )
+            .dim(),
+        ));
+    }
 
     Ok(Pin {
         session,
         lockfile: lockfile.path.clone(),
+        kind: lockfile.kind,
+        original,
     })
 }
 
@@ -330,7 +359,8 @@ pub fn reconcile() {
     }
 }
 
-/// Run the consumer's package manager so the pin takes effect.
+/// Run the consumer's package manager so the pin takes effect, letting its
+/// output through to the terminal.
 pub fn install(consumer_dir: &Path, kind: Kind) -> Result<(), String> {
     let (program, args) = kind.command();
 
@@ -339,13 +369,7 @@ pub fn install(consumer_dir: &Path, kind: Kind) -> Result<(), String> {
         style(format!("{program} {}", args.join(" "))).cyan()
     ));
 
-    // Node ignores the macOS keychain, so the package manager has to be told
-    // about our CA. Setting it here rather than relying on the shell profile
-    // means setup takes effect immediately, with no terminal restart.
-    let status = std::process::Command::new(program)
-        .args(args)
-        .current_dir(consumer_dir)
-        .env("NODE_EXTRA_CA_CERTS", ca::cert_path())
+    let status = command(consumer_dir, kind)
         .status()
         .map_err(|e| format!("failed to run `{program}`: {e}"))?;
 
@@ -353,6 +377,46 @@ pub fn install(consumer_dir: &Path, kind: Kind) -> Result<(), String> {
         return Err(format!("`{program} {}` failed", args.join(" ")));
     }
     Ok(())
+}
+
+/// As [`install`], but capturing the package manager's output instead of
+/// letting it reach the terminal, and returning it line by line.
+///
+/// A UI owns the screen: anything the package manager printed itself would be
+/// drawn over the frame and corrupt it.
+pub fn install_captured(consumer_dir: &Path, kind: Kind) -> Result<Vec<String>, String> {
+    let (program, args) = kind.command();
+
+    let output = command(consumer_dir, kind)
+        .output()
+        .map_err(|e| format!("failed to run `{program}`: {e}"))?;
+
+    let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .chain(String::from_utf8_lossy(&output.stderr).lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    if !output.status.success() {
+        let reason = lines.last().cloned().unwrap_or_default();
+        return Err(format!("`{program} {}` failed: {reason}", args.join(" ")));
+    }
+    Ok(lines)
+}
+
+fn command(consumer_dir: &Path, kind: Kind) -> std::process::Command {
+    let (program, args) = kind.command();
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .current_dir(consumer_dir)
+        // Node ignores the macOS keychain, so the package manager has to be
+        // told about our CA. Setting it here rather than relying on the shell
+        // profile means setup takes effect immediately, with no restart.
+        .env("NODE_EXTRA_CA_CERTS", ca::cert_path());
+    command
 }
 
 #[cfg(test)]

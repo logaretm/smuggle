@@ -1,2 +1,20 @@
+# Only smuggle-cli is a member. The @smuggle-cli/* platform packages are
+# published straight from CI artifacts and their versions are written by
+# scripts/sync-versions.ts, so listing them here would only make changesets ask
+# for a changeset per architecture.
+packages:
+  - npm/smuggle-cli
+
+# smuggle-cli optionally depends on those same platform packages at an exact
+# version, which is a version CI has not published yet for the whole life of a
+# release PR. Resolving them here would make `pnpm install --frozen-lockfile`
+# fail on that branch, and nothing in this repo installs the binary from npm
+# anyway.
+ignoredOptionalDependencies:
+  - '@smuggle-cli/darwin-arm64'
+  - '@smuggle-cli/darwin-x64'
+  - '@smuggle-cli/linux-arm64-gnu'
+  - '@smuggle-cli/linux-x64-gnu'
+
 allowBuilds:
   esbuild: true

@@ -48,7 +48,19 @@ Tests use the `@test-smug/` scope to avoid conflicts. Integration tests that nee
 
 ## Release flow
 
-1. Trigger "Bump & Release" workflow from GitHub Actions (patch/minor/major)
-2. This bumps `Cargo.toml`, commits, tags, and pushes
-3. The tag push triggers the "Release" workflow which builds cross-platform binaries
+Releases are driven by changesets. See `.changeset/README.md` for the details.
+
+1. Every PR adds a changeset (`pnpm changeset`, or `pnpm changeset --empty` for
+   anything not user-visible). CI fails the PR without one.
+2. Merging a changeset to `main` opens or updates a `chore: release` PR holding
+   the version bump and the CHANGELOG entry. Pending changesets accumulate into
+   that one PR.
+3. Merging the release PR is the release. "Publish" tags `vX.Y.Z` and calls
+   "Release", which builds the four platform binaries, publishes them and
+   `smuggle-cli` to npm, and cuts a GitHub release from the new CHANGELOG
+   section.
 4. After release, update Homebrew tap: `gh workflow run update-formula.yml -R logaretm/homebrew-tap -f formula=smuggle -f version=X.Y.Z -f repo=logaretm/smuggle`
+
+Changesets versions `npm/smuggle-cli` and `scripts/sync-versions.ts` copies that
+version onto `Cargo.toml`, `Cargo.lock`, and the `@smuggle-cli/*` platform
+packages. Never hand-edit a version number.

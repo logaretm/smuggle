@@ -20,7 +20,7 @@ use console::style;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::net::{hosts, smuggle_home};
+use crate::net::{ca, hosts, smuggle_home};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -339,9 +339,13 @@ pub fn install(consumer_dir: &Path, kind: Kind) -> Result<(), String> {
         style(format!("{program} {}", args.join(" "))).cyan()
     ));
 
+    // Node ignores the macOS keychain, so the package manager has to be told
+    // about our CA. Setting it here rather than relying on the shell profile
+    // means setup takes effect immediately, with no terminal restart.
     let status = std::process::Command::new(program)
         .args(args)
         .current_dir(consumer_dir)
+        .env("NODE_EXTRA_CA_CERTS", ca::cert_path())
         .status()
         .map_err(|e| format!("failed to run `{program}`: {e}"))?;
 

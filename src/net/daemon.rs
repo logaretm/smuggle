@@ -58,7 +58,7 @@ pub fn run(owner_uid: u32) -> Result<(), String> {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let state = state.clone();
-        std::thread::spawn(move || serve_session(stream, state));
+        std::thread::spawn(move || serve_session(stream, state, owner_uid));
     }
 
     Ok(())
@@ -88,7 +88,7 @@ fn restrict_socket(path: &Path, owner_uid: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn serve_session(stream: UnixStream, state: Shared) {
+fn serve_session(stream: UnixStream, state: Shared, owner_uid: u32) {
     let Ok(write_half) = stream.try_clone() else {
         return;
     };
@@ -137,14 +137,14 @@ fn serve_session(stream: UnixStream, state: Shared) {
         id
     };
 
-    if let Err(e) = resync(&state) {
+    if let Err(e) = resync(&state, owner_uid) {
         let _ = send(&write_half, &Reply::Error { message: e });
-        drop_session(&state, id);
+        drop_session(&state, id, owner_uid);
         return;
     }
 
     if send(&write_half, &Reply::Ok).is_err() {
-        drop_session(&state, id);
+        drop_session(&state, id, owner_uid);
         return;
     }
 
@@ -164,13 +164,13 @@ fn serve_session(stream: UnixStream, state: Shared) {
         sink.clear();
     }
 
-    drop_session(&state, id);
+    drop_session(&state, id, owner_uid);
     drop(forwarder);
 }
 
-fn drop_session(state: &Shared, id: u64) {
+fn drop_session(state: &Shared, id: u64, owner_uid: u32) {
     state.lock().unwrap().sessions.remove(&id);
-    if let Err(e) = resync(state) {
+    if let Err(e) = resync(state, owner_uid) {
         eprintln!("smuggle daemon: {e}");
     }
 }
@@ -183,7 +183,7 @@ fn send(mut stream: &UnixStream, reply: &Reply) -> std::io::Result<()> {
 
 /// Bring the proxy in line with what is currently registered: start it, stop
 /// it, or restart it with a new set of packages and registries.
-fn resync(state: &Shared) -> Result<(), String> {
+fn resync(state: &Shared, owner_uid: u32) -> Result<(), String> {
     let (wanted, verbose) = {
         let state = state.lock().unwrap();
         let mut packages: Vec<String> = Vec::new();
@@ -211,7 +211,7 @@ fn resync(state: &Shared) -> Result<(), String> {
         return Ok(());
     }
 
-    let child = spawn_proxy(&packages, &registries, verbose)?;
+    let child = spawn_proxy(&packages, &registries, verbose, owner_uid)?;
     let stdout = child.stdout.as_ref().map(|_| ());
     state.lock().unwrap().proxy = Some(child);
 
@@ -231,10 +231,21 @@ fn stop_proxy(state: &Shared) {
     let _ = child.wait();
 }
 
-fn spawn_proxy(packages: &[String], registries: &[String], verbose: bool) -> Result<Child, String> {
+fn spawn_proxy(
+    packages: &[String],
+    registries: &[String],
+    verbose: bool,
+    owner_uid: u32,
+) -> Result<Child, String> {
     let exe = super::launchd::staged_binary();
 
+    // launchd gives this daemon no useful HOME, so the proxy is told outright
+    // where the owner's CA and package store live.
+    let home = super::home_of_uid(owner_uid)
+        .ok_or_else(|| format!("could not resolve the home directory of uid {owner_uid}"))?;
+
     let mut command = Command::new(&exe);
+    command.env(super::HOME_VAR, home.join(".smuggle"));
     command.arg("proxy");
     for name in packages {
         command.arg("--hijack").arg(name);

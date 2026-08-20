@@ -51,11 +51,14 @@ pub fn cmd_setup() -> Result<(), String> {
 
     install_daemon()?;
 
+    // smuggle passes the CA to every package manager it runs, so a session
+    // works straight away. The profile entry only matters for installs the
+    // user runs themselves in a shell.
     if trust::env_var_active() {
-        let _ = cliclack::outro("Setup complete. No further sudo prompts.");
+        let _ = cliclack::outro("Setup complete. You can run smuggle now.");
     } else {
         let _ = cliclack::outro(format!(
-            "Setup complete. Restart your shell (or {}) so npm picks up the CA.",
+            "Setup complete. You can run smuggle now.\nFor installs you run yourself, restart your shell or {}.",
             style(format!("source {}", profile.display())).cyan(),
         ));
     }

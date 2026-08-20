@@ -10,12 +10,21 @@ pub mod trust;
 
 use std::path::PathBuf;
 
+/// Environment variable the daemon uses to tell the proxy whose state to read.
+pub const HOME_VAR: &str = "SMUGGLE_HOME";
+
 /// Root of smuggle's on-disk state (`~/.smuggle`).
 ///
-/// The proxy runs under sudo, where `HOME` may point at root's home depending
-/// on the sudoers config. Resolve the invoking user's home instead so the
-/// proxy reads the same CA and package store the CLI wrote.
+/// This has to resolve to the user's directory even when the reader is not the
+/// user. The proxy is started by the launchd daemon, which runs as root with
+/// no meaningful `HOME`, so without an explicit answer it would look for the
+/// CA and the package store somewhere they will never be.
 pub fn smuggle_home() -> PathBuf {
+    if let Ok(explicit) = std::env::var(HOME_VAR) {
+        if !explicit.is_empty() {
+            return PathBuf::from(explicit);
+        }
+    }
     real_home().join(".smuggle")
 }
 
@@ -26,6 +35,22 @@ fn real_home() -> PathBuf {
         }
     }
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+}
+
+/// The home directory of a uid, for resolving the owner's state from a root
+/// process that has no relationship to their environment.
+pub fn home_of_uid(uid: u32) -> Option<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: getpwuid returns a pointer into a static buffer valid until the
+    // next call; we copy out of it immediately.
+    let entry = unsafe { libc::getpwuid(uid) };
+    if entry.is_null() {
+        return None;
+    }
+    let dir = unsafe { CStr::from_ptr((*entry).pw_dir) };
+    Some(PathBuf::from(OsStr::from_bytes(dir.to_bytes())))
 }
 
 fn home_of(user: &str) -> Option<PathBuf> {
@@ -161,5 +186,40 @@ mod tests {
     fn an_unmounted_registry_passes_paths_through() {
         let r = Registry::parse("https://registry.npmjs.org/").unwrap();
         assert_eq!(r.strip_prefix("/is-number"), Some("/is-number"));
+    }
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+
+    #[test]
+    fn an_explicit_home_wins_over_the_environment() {
+        // SAFETY: single-threaded test.
+        unsafe {
+            std::env::set_var(HOME_VAR, "/tmp/explicit-smuggle");
+            std::env::set_var("HOME", "/var/root");
+        }
+        assert_eq!(smuggle_home(), PathBuf::from("/tmp/explicit-smuggle"));
+        unsafe { std::env::remove_var(HOME_VAR) };
+    }
+
+    #[test]
+    fn an_empty_explicit_home_is_ignored() {
+        // SAFETY: single-threaded test.
+        unsafe {
+            std::env::set_var(HOME_VAR, "");
+            std::env::set_var("HOME", "/tmp/fallback");
+            std::env::remove_var("SUDO_USER");
+        }
+        assert_eq!(smuggle_home(), PathBuf::from("/tmp/fallback/.smuggle"));
+        unsafe { std::env::remove_var(HOME_VAR) };
+    }
+
+    #[test]
+    fn a_uid_resolves_to_its_home() {
+        // root always exists and has a home, unlike an arbitrary test user.
+        assert!(home_of_uid(0).is_some());
+        assert_eq!(home_of_uid(u32::MAX), None);
     }
 }

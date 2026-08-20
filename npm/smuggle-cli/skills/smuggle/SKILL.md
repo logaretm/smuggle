@@ -1,139 +1,92 @@
 ---
 name: smuggle
-description: Use when the user wants to test a local npm package in a consumer project, replace node_modules with a local build, hot-reload local packages, or avoid npm link / symlink issues. Also use when the user mentions "smuggle", "local package testing", or asks how to test a package they're developing locally.
+description: Use when the user wants to test a local npm package in a consumer project, serve a local build in place of a published one, or avoid npm link / symlink issues. Also use when the user mentions "smuggle", "local package testing", or asks how to test a package they're developing locally.
 allowed-tools: Bash, Read, Glob, Grep
 ---
 
-# Smuggle — Local npm Package Testing
+# Smuggle: local npm package testing
 
-Smuggle lets you test local npm packages in real consumer projects by directly overwriting files in `node_modules`. No symlinks, no lockfile pollution, no `.npmrc` hacks. Originals are backed up and restored on exit.
+Smuggle intercepts your package manager's registry requests and answers them with a local build. The package manager resolves, downloads and installs exactly as it normally would, so what lands in `node_modules` is a real install rather than files copied over the top.
+
+macOS only. Lockfile pinning supports npm and pnpm; yarn and bun are reported as unsupported rather than silently doing nothing.
 
 ## Prerequisites
 
-Check if smuggle is installed:
+Check that smuggle is installed:
 
 ```sh
 smuggle --help
 ```
 
-If not installed, install it with one of:
+If not, install it with one of:
 
 ```sh
-npm install -g smuggle-cli   # via npm
-brew install logaretm/tap/smuggle   # via Homebrew
-cargo install smuggle   # via Cargo
+npm install -g smuggle-cli
+brew install logaretm/tap/smuggle
+cargo install smuggle
 ```
+
+Then, once per machine:
+
+```sh
+smuggle setup
+```
+
+This installs a local certificate authority and a background daemon, asking for a password once. Nothing is intercepted by it; the daemon stays inert until a session starts. Re-run it after upgrading smuggle, since the daemon runs a staged copy of the binary. A session will say so if it is out of date.
 
 ## Commands
 
-### `smuggle publish` — Register local packages
+### `smuggle publish`
 
-Run this inside the package you're developing (or a pnpm workspace root). It packs the package the same way `npm publish` would and stores the tarball in `~/.smuggle/packages/`.
-
-```sh
-# Interactive — select which packages to publish
-smuggle publish
-
-# Publish all non-private packages in a workspace
-smuggle publish --all
-```
-
-**When to use:** The user has a library/package they're working on and wants to make it available for testing in another project.
-
-### `smuggle install` — Install into a consumer project
-
-Run this inside the project that depends on the package. Can also be invoked as just `smuggle` with no arguments.
+Run inside the package being developed, or a workspace root. Packs it the same way `npm publish` would and stores the tarball in `~/.smuggle/packages/`.
 
 ```sh
-smuggle install
-# or just:
-smuggle
+smuggle publish              # interactive selection in a workspace
+smuggle publish --all        # every non-private package
+smuggle publish --path ./pkg # a specific directory
 ```
 
-This will:
+### `smuggle` (or `smuggle hijack`)
 
-1. Scan `package.json` dependencies for matches against registered packages
-2. Prompt to select which ones to smuggle in
-3. Auto-include transitive dependencies that are also registered
-4. Back up the original `node_modules` copies
-5. Extract local packages directly into `node_modules`
-6. Clear bundler caches (Vite, Next.js, webpack) and touch `vite.config.*` to trigger a restart
-7. Watch for source changes — on change, re-pack and re-extract instantly
-8. Restore everything on exit (Ctrl+C)
-
-**When to use:** The user wants to test their local package changes inside a real consumer project.
-
-### `smuggle add <package>` — Add a package as a dependency
-
-Installs the package via the project's package manager (npm/pnpm/yarn) and then smuggles the local version in. Useful when the consumer project doesn't depend on the package yet.
+Run in the consumer project. Blocks until ctrl-c.
 
 ```sh
-smuggle add @scope/my-pkg
+smuggle                            # pick from registered packages matching the project
+smuggle --all                      # serve every match
+smuggle @scope/pkg-a @scope/pkg-b  # serve specific packages
+smuggle -v                         # log every request, not just hijacked ones
 ```
 
-**When to use:** The user wants to add a new dependency AND test the local version of it.
+It pins the integrity of those packages in the lockfile to the local build, runs the package manager once, and repacks whenever the source changes. On exit it restores the lockfile, stops intercepting, and reinstalls the published packages.
 
-### `smuggle list` — List registered packages
+While it runs, the user can install as often as they like and the local build is what arrives.
+
+### `smuggle ui`
+
+The same session as a terminal UI. Opens with nothing served; `space` toggles a package, `tab` switches between session, store and doctor views, `q` quits. Needs an interactive terminal.
+
+### Other commands
 
 ```sh
-smuggle list
+smuggle list                     # registered packages
+smuggle unpublish @scope/pkg     # remove one from the store
+smuggle cleanup                  # remove the CA, daemon, and any leftover redirect
 ```
 
-Shows all packages currently registered in `~/.smuggle/packages/`.
+## Typical flow
 
-### `smuggle unpublish <package>` — Remove a registered package
-
-```sh
-smuggle unpublish @scope/my-pkg
-```
-
-## Typical Workflow
-
-Here's the standard two-terminal workflow:
-
-**Terminal 1 — the library being developed:**
-
-```sh
-cd ~/my-library
-smuggle publish
-# Edit code... re-run publish when ready, or use install --watch from the consumer side
-```
-
-**Terminal 2 — the consumer project:**
-
-```sh
-cd ~/my-app
-smuggle install
-# Smuggle watches for changes and hot-swaps automatically
-# Press Ctrl+C to restore originals and exit
-```
-
-## How It Works
-
-- Packages are packed into tarballs identical to `npm publish` output
-- Tarballs are stored in `~/.smuggle/packages/` indexed by package name
-- On install, the original `node_modules` contents are backed up to a temp directory
-- The local tarball is extracted directly into `node_modules`, replacing the installed version
-- File watching uses hash-based change detection — cache busting and re-extraction only happen when the packed output actually changes
-- On exit, originals are restored from the backup
-
-## Key Design Decisions
-
-- **No symlinks** — packages are real files, behaving identically to a normal install
-- **No lockfile changes** — `pnpm-lock.yaml`, `package-lock.json`, `yarn.lock` stay untouched
-- **No `.npmrc` changes** — no registry overrides
-- **No `package.json` changes** — version ranges are preserved
-- **Workspace-aware** — detects pnpm workspaces and resolves transitive dependencies across workspace members
-- **Automatic cleanup** — originals are always restored, even on Ctrl+C
-
-## Supported Package Managers
-
-- pnpm (including workspaces)
-- npm
-- yarn
+1. `smuggle setup` if it has never been run on this machine.
+2. `smuggle publish` in the package directory.
+3. `smuggle` in the consumer project, and leave it running.
+4. Edit the package. Smuggle repacks; run the package manager again to pick it up, or press `space` twice in `smuggle ui`.
+5. ctrl-c when done.
 
 ## Troubleshooting
 
-- **"No matching packages found"** — run `smuggle list` to verify the package is registered, and check that the consumer's `package.json` lists it as a dependency
-- **Changes not reflecting** — smuggle uses hash-based detection; make sure the source files that are included in the package (per the `files` field in `package.json`) have actually changed
-- **Bundler not restarting** — smuggle busts caches for Vite, Next.js, and webpack; for other bundlers, you may need to restart manually
+**Nothing appears in the log during an install.** The project may resolve through a registry smuggle is not intercepting, which is common with company registries. `smuggle ui` has a doctor view showing the registry npm actually reports for the project. `--registry <url>` adds one explicitly.
+
+**A session says the daemon is out of date.** Run `smuggle setup` again. The daemon runs a copy of the binary staged in a root-owned directory, so upgrading smuggle does not update it.
+
+**Installs fail after a crash.** Run `smuggle cleanup`, which removes any leftover `/etc/hosts` redirect. A lockfile left pinned by a killed session is repaired the next time smuggle runs.
+
+**Do not hand-edit versions.** Smuggle serves whatever `smuggle publish` packed, at whatever version the source declares.

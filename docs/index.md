@@ -3,7 +3,7 @@ layout: home
 hero:
   name: Smuggle
   text: Local npm packages
-  tagline: No symlinks, no lockfile pollution, no registry overrides. Just real files in node_modules.
+  tagline: "Your package manager installs your local build as if you had published it. No symlinks, no file: references, no stale caches."
   actions:
     - theme: brand
       text: Get Started
@@ -18,7 +18,7 @@ hero:
 <div class="section-head">
   <span class="section-tag">live</span>
   <h2 class="section-title">See it run</h2>
-  <p class="section-sub">A typical session — publish, install, watch.</p>
+  <p class="section-sub">A typical session: publish, serve, iterate.</p>
 </div>
 
 <TerminalDemo />
@@ -26,7 +26,7 @@ hero:
 <div class="section-head">
   <span class="section-tag">flow</span>
   <h2 class="section-title">How it works</h2>
-  <p class="section-sub">Seven steps from your source folder into <code>node_modules</code>, and back out cleanly.</p>
+  <p class="section-sub">From your source folder to a real install, and back out cleanly.</p>
 </div>
 
 <ProcessDiagram />

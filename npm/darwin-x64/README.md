@@ -12,7 +12,7 @@ The correct platform-specific binary will be selected automatically.
 
 ## About Smuggle
 
-Smuggle lets you test local npm packages in real consumer projects — no symlinks, no lockfile pollution, no `.npmrc` hacks.
+Smuggle answers your package manager's registry requests with your local build, so testing a local package needs no symlinks and no `file:` references.
 
 See the [main package](https://www.npmjs.com/package/smuggle-cli) for full documentation, or visit the [GitHub repository](https://github.com/logaretm/smuggle).
 

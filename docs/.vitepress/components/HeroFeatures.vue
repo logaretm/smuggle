@@ -1,23 +1,23 @@
 <script setup>
 const FEATURES = [
   {
-    title: "No symlinks",
-    detail: "Real files in node_modules, just like a normal install.",
+    title: "A real install",
+    detail: "Your package manager fetches and unpacks your build itself.",
     accent: "rust",
   },
   {
-    title: "No lockfile churn",
-    detail: "pnpm-lock.yaml, package-lock.json, yarn.lock — untouched.",
+    title: "Survives reinstalls",
+    detail: "Installing again gets your code, not the published version.",
     accent: "bronze",
   },
   {
-    title: "Automatic cleanup",
-    detail: "Originals are restored on exit. Even on Ctrl-C.",
+    title: "No stale caches",
+    detail: "A rewritten integrity hash leaves no cache to serve the old package.",
     accent: "rust",
   },
   {
-    title: "Instant feedback",
-    detail: "File watcher re-packs and re-swaps on every change.",
+    title: "Nothing left behind",
+    detail: "Lockfile restored and published packages reinstalled when you quit.",
     accent: "bronze",
   },
 ];

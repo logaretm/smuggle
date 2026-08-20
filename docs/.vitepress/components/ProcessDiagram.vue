@@ -11,7 +11,7 @@ const PHASES = [
     detail: "Runs npm pack on your local package.",
     term: [
       { kind: "cmd", text: "smuggle publish" },
-      { kind: "info", text: "→ npm pack ./my-package" },
+      { kind: "info", text: "\u2192 npm pack ./my-package" },
     ],
   },
   {
@@ -20,63 +20,63 @@ const PHASES = [
     station: "vault",
     edge: null,
     label: "Storing in vault",
-    detail: "Tarball lands in ~/.smuggle, ready for install.",
+    detail: "Tarball lands in ~/.smuggle, ready to be served.",
     term: [
       { kind: "cmd", text: "smuggle publish" },
-      { kind: "info", text: "→ npm pack ./my-package" },
-      { kind: "ok", text: "✓ stored my-package@1.0.0" },
+      { kind: "info", text: "\u2192 npm pack ./my-package" },
+      { kind: "ok", text: "\u2713 stored my-package@1.0.0" },
     ],
   },
   {
-    id: "scan",
+    id: "intercept",
+    track: "install",
+    station: "vault",
+    edge: null,
+    label: "Intercepting the registry",
+    detail: "Registry hostnames point at a local proxy holding a certificate your machine trusts.",
+    term: [
+      { kind: "cmd", text: "smuggle" },
+      { kind: "muted", text: "match: my-package" },
+      { kind: "info", text: "intercepting registry.npmjs.org" },
+    ],
+  },
+  {
+    id: "pin",
     track: "install",
     station: "target",
     edge: null,
-    label: "Scanning dependencies",
-    detail: "Reads package.json — finds smuggled matches.",
+    label: "Pinning the lockfile",
+    detail: "The integrity of your package is rewritten to your build, so no cache can satisfy it.",
     term: [
-      { kind: "cmd", text: "smuggle install" },
-      { kind: "muted", text: "scanning package.json…" },
-      { kind: "info", text: "match: my-package" },
+      { kind: "cmd", text: "smuggle" },
+      { kind: "info", text: "intercepting registry.npmjs.org" },
+      { kind: "muted", text: "\u2192 pinned 1 lockfile entry" },
     ],
   },
   {
-    id: "backup",
-    track: "install",
-    station: "target",
-    edge: null,
-    label: "Backing up originals",
-    detail: "Saves the real node_modules entries aside.",
-    term: [
-      { kind: "cmd", text: "smuggle install" },
-      { kind: "info", text: "match: my-package" },
-      { kind: "muted", text: "→ backing up node_modules/my-package" },
-    ],
-  },
-  {
-    id: "swap",
+    id: "serve",
     track: "install",
     station: "target",
     edge: "vault-tgt",
-    label: "Swapping in tarball",
-    detail: "Smuggled package replaces the original. Real files.",
+    label: "Serving your build",
+    detail: "Your package manager fetches as usual. The proxy answers from the vault.",
     term: [
-      { kind: "cmd", text: "smuggle install" },
-      { kind: "muted", text: "→ extracting my-package@1.0.0" },
-      { kind: "ok", text: "✓ swapped my-package" },
+      { kind: "muted", text: "\u2192 npm install" },
+      { kind: "info", text: "served my-package from the store" },
+      { kind: "ok", text: "\u2713 installed my-package" },
     ],
   },
   {
     id: "watch",
     track: "install",
-    station: "target",
-    edge: "vault-tgt",
+    station: "vault",
+    edge: null,
     label: "Watching for changes",
-    detail: "Re-pack and re-swap on every save.",
+    detail: "Editing your package repacks it, so the next install picks it up.",
     term: [
-      { kind: "ok", text: "✓ swapped my-package" },
-      { kind: "muted", text: "watching ~/projects/my-package…" },
-      { kind: "info", text: "↻ src/index.ts changed → re-swap" },
+      { kind: "ok", text: "\u2713 installed my-package" },
+      { kind: "muted", text: "watching ~/projects/my-package\u2026" },
+      { kind: "info", text: "\u21bb src/index.ts changed \u2192 repacked" },
     ],
   },
   {
@@ -85,11 +85,11 @@ const PHASES = [
     station: "target",
     edge: "tgt-vault",
     label: "Restoring on exit",
-    detail: "Originals come back — even on Ctrl-C.",
+    detail: "Lockfile put back, interception stopped, published packages reinstalled.",
     term: [
-      { kind: "muted", text: "watching…" },
+      { kind: "muted", text: "watching\u2026" },
       { kind: "warn", text: "^C  caught SIGINT" },
-      { kind: "ok", text: "✓ restored originals" },
+      { kind: "ok", text: "\u2713 restored, published packages back" },
     ],
   },
 ];
@@ -101,7 +101,7 @@ const container = ref(null);
 
 const current = computed(() => PHASES[phaseIndex.value]);
 const trackName = computed(() =>
-  current.value.track === "publish" ? "smuggle publish" : "smuggle install",
+  current.value.track === "publish" ? "smuggle publish" : "smuggle",
 );
 
 let timer = null;
@@ -144,7 +144,7 @@ onUnmounted(() => {
           <span class="track-dot" /> smuggle publish
         </span>
         <span class="track-tab" :class="{ active: current.track === 'install' }">
-          <span class="track-dot" /> smuggle install
+          <span class="track-dot" /> smuggle
         </span>
       </div>
       <div class="phase-label">
@@ -420,13 +420,13 @@ onUnmounted(() => {
             <li
               :class="{
                 hot:
-                  current.id === 'swap' ||
+                  current.id === 'serve' ||
                   current.id === 'watch' ||
-                  current.id === 'backup',
+                  current.id === 'pin',
               }"
             >
               <span class="dot hot" /> my-package
-              <span class="badge swap" v-if="current.id === 'swap' || current.id === 'watch'">smuggled</span>
+              <span class="badge swap" v-if="current.id === 'serve' || current.id === 'watch'">smuggled</span>
               <span class="badge restore" v-if="current.id === 'restore'">restored</span>
             </li>
             <li><span class="dot" /> react</li>

@@ -17,7 +17,7 @@ const TOOLS = [
       {
         file: "package.json",
         bad: [{ kind: "ctx", text: '"my-pkg": "^1.0.0"' }],
-        badNote: "Range stays — but resolves to a symlink, not a release",
+        badNote: "Range stays, but resolves to a symlink rather than a release",
       },
       {
         file: "pnpm-lock.yaml / package-lock.json",
@@ -33,7 +33,7 @@ const TOOLS = [
       {
         file: "node_modules/my-pkg",
         bad: [{ kind: "ctx", text: "real folder" }],
-        badNote: "OK — but everything below leaks into source control",
+        badNote: "Fine here, but everything below leaks into source control",
       },
       {
         file: "package.json",
@@ -41,7 +41,7 @@ const TOOLS = [
           { kind: "del", text: '"my-pkg": "^1.0.0"' },
           { kind: "add", text: '"my-pkg": "file:../my-pkg"' },
         ],
-        badNote: "Local path committed to repo — breaks for everyone else",
+        badNote: "Local path committed to the repo, which breaks for everyone else",
       },
       {
         file: "pnpm-lock.yaml / package-lock.json",
@@ -60,7 +60,7 @@ const TOOLS = [
       {
         file: "node_modules/my-pkg",
         bad: [{ kind: "ctx", text: "real folder" }],
-        badNote: "OK — but yalc still leaves traces elsewhere",
+        badNote: "Fine here, but yalc still leaves traces elsewhere",
       },
       {
         file: "package.json",
@@ -68,7 +68,7 @@ const TOOLS = [
           { kind: "del", text: '"my-pkg": "^1.0.0"' },
           { kind: "add", text: '"my-pkg": "file:.yalc/my-pkg"' },
         ],
-        badNote: "Modified — easy to commit by mistake",
+        badNote: "Modified, and easy to commit by mistake",
       },
       {
         file: ".yalc/  +  yalc.lock",
@@ -83,7 +83,7 @@ const after = [
   {
     file: "node_modules/my-pkg",
     good: [{ kind: "ok", text: "real folder, real files" }],
-    goodNote: "Bundlers, Vite, Node — all see a normal install",
+    goodNote: "Your package manager unpacked it, so bundlers, Vite and Node see a normal install",
   },
   {
     file: "package.json",
@@ -92,8 +92,11 @@ const after = [
   },
   {
     file: "pnpm-lock.yaml / package-lock.json",
-    good: [{ kind: "ctx", text: "(unchanged)" }],
-    goodNote: "No churn. Nothing to revert before committing.",
+    good: [
+      { kind: "ok", text: "integrity pinned while running" },
+      { kind: "ok", text: "restored when you quit" },
+    ],
+    goodNote: "Changed only for the packages you serve, and put back on exit",
   },
 ];
 
@@ -160,7 +163,7 @@ const tool = () => TOOLS.find((t) => t.id === active.value);
       <div class="ba-panel ba-good">
         <div class="ba-panel-head">
           <span class="ba-panel-tag">after</span>
-          <span class="ba-panel-title">smuggle install</span>
+          <span class="ba-panel-title">smuggle</span>
           <span class="ba-panel-glyph ba-good-glyph" aria-hidden="true">
             <svg viewBox="0 0 16 16"><path d="M3 8 L7 12 L13 4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" /></svg>
           </span>

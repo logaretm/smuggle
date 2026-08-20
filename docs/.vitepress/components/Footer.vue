@@ -7,7 +7,6 @@ const COLUMNS = [
     links: [
       { text: "Why Smuggle?", to: "/guide/why" },
       { text: "Getting Started", to: "/guide/getting-started" },
-      { text: "CI / Non-Interactive", to: "/guide/ci" },
     ],
   },
   {

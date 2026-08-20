@@ -32,6 +32,19 @@ pub fn start(
     registries: &[String],
     verbose: bool,
 ) -> Result<Registration, String> {
+    start_with_sink(packages, registries, verbose, None)
+}
+
+/// As [`start`], but delivering replies to `sink` instead of stdout.
+///
+/// Events reach the connection that registered, so a UI has to read them here
+/// rather than opening a second connection, which would receive nothing.
+pub fn start_with_sink(
+    packages: &[String],
+    registries: &[String],
+    verbose: bool,
+    sink: Option<std::sync::mpsc::Sender<control::Reply>>,
+) -> Result<Registration, String> {
     let path = control::socket_path();
     let stream = UnixStream::connect(&path).map_err(|e| {
         if !crate::net::launchd::is_installed() {
@@ -84,10 +97,21 @@ pub fn start(
 
     std::thread::spawn(move || {
         for line in reader.lines().map_while(Result::ok) {
-            match serde_json::from_str::<control::Reply>(&line) {
-                Ok(control::Reply::Event { event }) => println!("{}", event.to_line()),
-                Ok(control::Reply::Log { line }) => println!("{line}"),
-                _ => {}
+            let Ok(reply) = serde_json::from_str::<control::Reply>(&line) else {
+                continue;
+            };
+            match &sink {
+                // A UI renders replies itself; printing here would corrupt it.
+                Some(sink) => {
+                    if sink.send(reply).is_err() {
+                        break;
+                    }
+                }
+                None => match reply {
+                    control::Reply::Event { event } => println!("{}", event.to_line()),
+                    control::Reply::Log { line } => println!("{line}"),
+                    _ => {}
+                },
             }
         }
     });
@@ -163,7 +187,7 @@ pub fn run(
 
     // The pin is only satisfiable while the proxy runs, so it is undone during
     // teardown below, before interception stops.
-    let pin = lockfile::pin(&lock, &tarball_hashes(&names))?;
+    let pin = lockfile::pin(&lock, &tarball_hashes(&names), true)?;
     lockfile::install(&consumer_dir, lock.kind)?;
 
     let _ = cliclack::log::info(format!(
@@ -233,7 +257,7 @@ fn teardown(
 /// The daemon tears the redirect down asynchronously once we deregister, so
 /// give it a moment before reinstalling. Returns false if it is still up,
 /// which is legitimate when another session holds it.
-fn wait_for_interception_to_stop() -> bool {
+pub fn wait_for_interception_to_stop() -> bool {
     for _ in 0..30 {
         if crate::net::hosts::read_block().is_none() {
             return true;
@@ -278,6 +302,16 @@ fn resolve_registries(consumer_dir: &Path, extra: &[String]) -> Vec<String> {
         }
     }
 
+    merge_registries(detected, extra)
+}
+
+/// As [`resolve_registries`], but printing nothing. A UI owns the terminal, so
+/// stray log lines would corrupt the frame.
+pub fn resolve_registries_quietly(consumer_dir: &Path, extra: &[String]) -> Vec<String> {
+    merge_registries(detect_registries(consumer_dir), extra)
+}
+
+fn merge_registries(detected: Vec<String>, extra: &[String]) -> Vec<String> {
     let mut all = detected;
     all.extend(extra.iter().cloned());
     all.extend(crate::net::DEFAULT_REGISTRIES.iter().map(|r| r.to_string()));

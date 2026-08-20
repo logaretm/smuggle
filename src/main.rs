@@ -119,6 +119,11 @@ enum Commands {
         /// Package answered from the local store instead of upstream. Repeatable.
         #[arg(long = "hijack")]
         hijack: Vec<String>,
+
+        /// Emit machine-readable events instead of formatted lines. Used by
+        /// the daemon so sessions can render the facts themselves.
+        #[arg(long, hide = true)]
+        events: bool,
     },
 
     /// Run the root daemon. Internal: started by launchd, never by hand.
@@ -193,6 +198,7 @@ fn main() {
             no_redirect,
             verbose,
             hijack,
+            events,
         }) => {
             let sources: Vec<String> = if cli.registries.is_empty() {
                 net::DEFAULT_REGISTRIES
@@ -224,6 +230,7 @@ fn main() {
                 no_redirect,
                 verbose,
                 hijack,
+                events,
             })
         }
         // bare `smuggle` or `smuggle <names>` is the same as `smuggle hijack`

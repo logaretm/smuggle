@@ -17,12 +17,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 
-use super::control::{Register, Reply, socket_path};
+use super::control::{DaemonStatus, Event, Reply, Request, socket_path};
 
 /// One connected session.
 struct Session {
-    register: Register,
-    logs: Sender<String>,
+    packages: Vec<String>,
+    registries: Vec<String>,
+    verbose: bool,
+    events: Sender<Reply>,
 }
 
 #[derive(Default)]
@@ -99,7 +101,7 @@ fn serve_session(stream: UnixStream, state: Shared, owner_uid: u32) {
         return;
     }
 
-    let register: Register = match serde_json::from_str(line.trim()) {
+    let request: Request = match serde_json::from_str(line.trim()) {
         Ok(r) => r,
         Err(e) => {
             let _ = send(
@@ -112,28 +114,54 @@ fn serve_session(stream: UnixStream, state: Shared, owner_uid: u32) {
         }
     };
 
-    if register.version != super::control::version() {
+    if request.version() != super::control::version() {
         let _ = send(
             &write_half,
             &Reply::Error {
                 message: format!(
                     "daemon is running {} but you are on {}. Run `smuggle setup` to restage it.",
                     super::control::version(),
-                    register.version,
+                    request.version(),
                 ),
             },
         );
         return;
     }
 
-    // Log lines are pushed from the proxy-reading thread, so the connection
-    // gets its own channel rather than being written to from there directly.
-    let (logs, incoming) = channel::<String>();
+    let (packages, registries, verbose) = match request {
+        Request::Register {
+            packages,
+            registries,
+            verbose,
+            ..
+        } => (packages, registries, verbose),
+        // A status request is answered and closed; it registers nothing, so it
+        // never affects what is intercepted.
+        Request::Status { .. } => {
+            let status = snapshot(&state);
+            let _ = send(&write_half, &Reply::Status { status });
+            return;
+        }
+    };
+
+    // Everything the daemon sends after the first reply goes through this
+    // channel, so exactly one thread ever writes to the socket. Two writers
+    // would interleave and corrupt the stream.
+    let (events, incoming) = channel::<Reply>();
+    let acks = events.clone();
     let id = {
         let mut state = state.lock().unwrap();
         let id = state.next_id;
         state.next_id += 1;
-        state.sessions.insert(id, Session { register, logs });
+        state.sessions.insert(
+            id,
+            Session {
+                packages,
+                registries,
+                verbose,
+                events,
+            },
+        );
         id
     };
 
@@ -150,18 +178,50 @@ fn serve_session(stream: UnixStream, state: Shared, owner_uid: u32) {
 
     // Forward proxy output to this session for as long as it is connected.
     let forwarder = std::thread::spawn(move || {
-        for line in incoming {
-            if send(&write_half, &Reply::Log { line }).is_err() {
+        for reply in incoming {
+            if send(&write_half, &reply).is_err() {
                 break;
             }
         }
     });
 
-    // The session holds the connection open. Reading to EOF is how we learn it
-    // is gone, whether it exited cleanly or was killed.
-    let mut sink = String::new();
-    while matches!(reader.read_line(&mut sink), Ok(n) if n > 0) {
-        sink.clear();
+    // The session holds the connection open. Further lines re-register it,
+    // which is how a session changes what it hijacks without dropping the
+    // connection and making the proxy flap. Reading to EOF is how we learn the
+    // session is gone, whether it exited cleanly or was killed.
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+
+        let Ok(Request::Register {
+            packages,
+            registries,
+            verbose,
+            ..
+        }) = serde_json::from_str::<Request>(line.trim())
+        else {
+            continue;
+        };
+
+        {
+            let mut guard = state.lock().unwrap();
+            if let Some(session) = guard.sessions.get_mut(&id) {
+                session.packages = packages;
+                session.registries = registries;
+                session.verbose = verbose;
+            }
+        }
+
+        let reply = match resync(&state, owner_uid) {
+            Ok(()) => Reply::Ok,
+            Err(message) => Reply::Error { message },
+        };
+        if acks.send(reply).is_err() {
+            break;
+        }
     }
 
     drop_session(&state, id, owner_uid);
@@ -190,9 +250,9 @@ fn resync(state: &Shared, owner_uid: u32) -> Result<(), String> {
         let mut registries: Vec<String> = Vec::new();
         let mut verbose = false;
         for session in state.sessions.values() {
-            packages.extend(session.register.packages.iter().cloned());
-            registries.extend(session.register.registries.iter().cloned());
-            verbose |= session.register.verbose;
+            packages.extend(session.packages.iter().cloned());
+            registries.extend(session.registries.iter().cloned());
+            verbose |= session.verbose;
         }
         packages.sort();
         packages.dedup();
@@ -246,7 +306,7 @@ fn spawn_proxy(
 
     let mut command = Command::new(&exe);
     command.env(super::HOME_VAR, home.join(".smuggle"));
-    command.arg("proxy");
+    command.arg("proxy").arg("--events");
     for name in packages {
         command.arg("--hijack").arg(name);
     }
@@ -290,9 +350,40 @@ fn fan_out_logs(state: Shared) {
 
 fn pump<R: std::io::Read>(reader: BufReader<R>, state: Shared) {
     for line in reader.lines().map_while(Result::ok) {
+        // The proxy emits structured events; anything else is passed through
+        // verbatim rather than dropped.
+        let reply = match serde_json::from_str::<Event>(&line) {
+            Ok(event) => Reply::Event { event },
+            Err(_) => Reply::Log { line },
+        };
+
         let guard = state.lock().unwrap();
         for session in guard.sessions.values() {
-            let _ = session.logs.send(line.clone());
+            let _ = session.events.send(reply.clone());
         }
+    }
+}
+
+/// What the daemon is currently doing, for `Request::Status`.
+fn snapshot(state: &Shared) -> DaemonStatus {
+    let state = state.lock().unwrap();
+
+    let mut packages: Vec<String> = Vec::new();
+    let mut registries: Vec<String> = Vec::new();
+    for session in state.sessions.values() {
+        packages.extend(session.packages.iter().cloned());
+        registries.extend(session.registries.iter().cloned());
+    }
+    packages.sort();
+    packages.dedup();
+    registries.sort();
+    registries.dedup();
+
+    DaemonStatus {
+        version: super::control::version(),
+        sessions: state.sessions.len(),
+        packages,
+        registries,
+        proxy_running: state.proxy.is_some(),
     }
 }

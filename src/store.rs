@@ -4,8 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn store_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".smuggle").join("packages")
+    crate::net::smuggle_home().join("packages")
 }
 
 fn pkg_dir(name: &str) -> PathBuf {

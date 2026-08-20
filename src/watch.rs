@@ -1,56 +1,23 @@
+//! Source watching for smuggled packages.
+//!
+//! When a package's sources change, it is repacked and written back to the
+//! store. The proxy reads tarballs from the store on every request, so a
+//! repack is all it takes for the next install to serve new content.
+
 use console::style;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{backup, pack, pm, store};
+use crate::{pack, store};
 
-/// A resolved target in node_modules to override with a local package.
-pub struct OverrideTarget {
-    pub name: String,
-    pub target_dir: PathBuf,
-}
-
-/// What to do after successfully swapping packages in node_modules.
-pub enum PostSwapAction<'a> {
-    /// Clear bundler caches and touch vite configs to trigger HMR reload.
-    ClearCachesAndTouch {
-        consumer_dir: &'a Path,
-        workspace_pkg_dirs: &'a [PathBuf],
-    },
-    /// Call a function after each swap (e.g. to restart a dev server).
-    #[allow(clippy::type_complexity)]
-    Notify {
-        /// Called after each successful swap with the list of changed package names.
-        on_swap: Box<dyn FnMut(&[String]) + 'a>,
-    },
-}
-
-/// Watch source directories for changes and re-extract tarballs when content changes.
-/// If `shutdown` is provided, the loop exits when the flag is set.
-pub fn watch_and_reinstall(
+/// Watch the sources of `selected` and repack into the store on change.
+/// Blocks until `shutdown` is set. `on_repack` is called with the names of the
+/// packages whose packed content actually changed.
+pub fn watch_and_repack(
     selected: &[&store::StoreEntry],
-    targets: &[OverrideTarget],
-    action: &mut PostSwapAction<'_>,
-) -> Result<(), String> {
-    watch_and_reinstall_inner(selected, targets, action, None)
-}
-
-/// Like `watch_and_reinstall`, but exits when `shutdown` is set to true.
-pub fn watch_and_reinstall_until(
-    selected: &[&store::StoreEntry],
-    targets: &[OverrideTarget],
-    action: &mut PostSwapAction<'_>,
+    on_repack: &mut dyn FnMut(&[String]),
     shutdown: &Arc<AtomicBool>,
-) -> Result<(), String> {
-    watch_and_reinstall_inner(selected, targets, action, Some(shutdown))
-}
-
-fn watch_and_reinstall_inner(
-    selected: &[&store::StoreEntry],
-    targets: &[OverrideTarget],
-    action: &mut PostSwapAction<'_>,
-    shutdown: Option<&Arc<AtomicBool>>,
 ) -> Result<(), String> {
     use notify::{RecursiveMode, Watcher};
     use std::collections::HashMap;
@@ -89,7 +56,8 @@ fn watch_and_reinstall_inner(
         }
     }
 
-    // Track tarball hashes to avoid unnecessary restarts
+    // Track tarball hashes so an edit that does not change packed output is
+    // not reported as a change.
     let mut last_hashes: HashMap<String, u64> = HashMap::new();
     for entry in selected {
         if let Ok(tarball) = store::load_tarball(&entry.name) {
@@ -99,29 +67,17 @@ fn watch_and_reinstall_inner(
 
     let batch_window = Duration::from_secs(5);
     let stabilize_delay = Duration::from_secs(1);
-
     let poll_interval = Duration::from_millis(200);
 
     loop {
-        // Check shutdown flag before blocking
-        if let Some(flag) = shutdown {
-            if flag.load(Ordering::SeqCst) {
-                break;
-            }
+        if shutdown.load(Ordering::SeqCst) {
+            break;
         }
 
-        // Use recv_timeout so we can check the shutdown flag periodically
-        let first_event = if shutdown.is_some() {
-            match rx.recv_timeout(poll_interval) {
-                Ok(event) => event,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        } else {
-            match rx.recv() {
-                Ok(event) => event,
-                Err(_) => break,
-            }
+        let first_event = match rx.recv_timeout(poll_interval) {
+            Ok(event) => event,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
         let batch_start = Instant::now();
@@ -144,17 +100,14 @@ fn watch_and_reinstall_inner(
         std::thread::sleep(stabilize_delay);
         while rx.try_recv().is_ok() {}
 
-        // Determine which packages changed
-        let mut changed_packages: Vec<String> = Vec::new();
-        for entry in selected {
-            let source = &entry.source_dir;
-            if changed_paths
-                .iter()
-                .any(|p| p.starts_with(source) && !is_ignored_path(p, source))
-            {
-                changed_packages.push(entry.name.clone());
-            }
-        }
+        let changed_packages: Vec<&&store::StoreEntry> = selected
+            .iter()
+            .filter(|entry| {
+                changed_paths.iter().any(|p| {
+                    p.starts_with(&entry.source_dir) && !is_ignored_path(p, &entry.source_dir)
+                })
+            })
+            .collect();
 
         if changed_packages.is_empty() {
             continue;
@@ -162,132 +115,68 @@ fn watch_and_reinstall_inner(
 
         let pkg_list = changed_packages
             .iter()
-            .map(|p| style(p).cyan().to_string())
+            .map(|e| style(&e.name).cyan().to_string())
             .collect::<Vec<_>>()
             .join(", ");
         let _ = cliclack::log::warning(format!("Change detected in: {pkg_list}"));
 
         let spinner = cliclack::spinner();
+        spinner.start("Repacking...");
 
-        // Re-pack and check if content actually changed
-        spinner.start("Packing changed packages...");
-        let mut to_extract: Vec<(String, Vec<u8>, PathBuf)> = Vec::new();
-        for pkg_name in &changed_packages {
-            let entry = selected.iter().find(|e| &e.name == pkg_name).unwrap();
-            let Some(target) = targets.iter().find(|t| t.name == *pkg_name) else {
-                continue;
-            };
-
-            let pkg_json_path = entry.source_dir.join("package.json");
-            let Ok(raw) = std::fs::read_to_string(&pkg_json_path) else {
-                let _ =
-                    cliclack::log::warning(format!("Could not read {}", pkg_json_path.display()));
-                continue;
-            };
-            let Ok(pkg_json) = serde_json::from_str::<pack::PublishPackageJson>(&raw) else {
-                let _ =
-                    cliclack::log::warning(format!("Could not parse {}", pkg_json_path.display()));
-                continue;
-            };
-
-            match pack::pack(&entry.source_dir, &pkg_json) {
-                Ok(tarball) => {
-                    let new_hash = hash_bytes(&tarball);
-                    let old_hash = last_hashes.get(pkg_name).copied();
-
-                    if old_hash == Some(new_hash) {
-                        continue;
-                    }
-
-                    last_hashes.insert(pkg_name.clone(), new_hash);
-                    let version = pkg_json.version.as_deref().unwrap_or("0.0.0");
-                    let _ = store::save(
-                        &entry.name,
-                        version,
-                        &entry.source_dir,
-                        &tarball,
-                        &pkg_json.dependencies(),
-                    );
-
-                    to_extract.push((pkg_name.clone(), tarball, target.target_dir.clone()));
-                }
+        let mut repacked: Vec<String> = Vec::new();
+        for entry in changed_packages {
+            match repack(entry, &mut last_hashes) {
+                Ok(true) => repacked.push(entry.name.clone()),
+                Ok(false) => {}
                 Err(e) => {
-                    let _ = cliclack::log::warning(format!("Failed to pack {}: {e}", entry.name));
+                    let _ = cliclack::log::warning(e);
                 }
             }
         }
 
-        // Extract changed packages into node_modules
-        let mut actually_changed: Vec<String> = Vec::new();
-        if !to_extract.is_empty() {
-            let use_backup = matches!(action, PostSwapAction::ClearCachesAndTouch { .. });
-
-            let backup_state = if use_backup {
-                let backup_pairs: Vec<(String, PathBuf)> = to_extract
-                    .iter()
-                    .map(|(name, _, target)| (name.clone(), target.clone()))
-                    .collect();
-                match backup::backup_targets(&backup_pairs) {
-                    Ok(base) => Some((base, backup_pairs)),
-                    Err(e) => {
-                        spinner.stop(format!("{} backup failed: {e}", style("✗").red()));
-                        continue;
-                    }
-                }
-            } else {
-                None
-            };
-
-            spinner.start(format!("Smuggling {} package(s)...", to_extract.len()));
-            let mut failed = false;
-            for (pkg_name, tarball, target_dir) in &to_extract {
-                if let Err(e) = pack::extract_tarball_to(tarball, target_dir) {
-                    spinner.stop(format!("{} extraction failed: {e}", style("✗").red()));
-                    if let Some((ref base, ref pairs)) = backup_state {
-                        backup::restore_all(base, pairs);
-                    }
-                    failed = true;
-                    break;
-                }
-                actually_changed.push(pkg_name.clone());
-            }
-
-            if !failed {
-                if let Some((ref base, _)) = backup_state {
-                    let _ = std::fs::remove_dir_all(base);
-                }
-            } else {
-                actually_changed.clear();
-            }
-        }
-
-        if actually_changed.is_empty() {
+        if repacked.is_empty() {
             spinner.stop(format!("{}", style("No content changes").dim()));
             continue;
         }
 
-        spinner.stop(format!(
-            "Smuggled {}",
-            style(actually_changed.join(", ")).cyan()
-        ));
-
-        // Post-swap action
-        match action {
-            PostSwapAction::ClearCachesAndTouch {
-                consumer_dir,
-                workspace_pkg_dirs,
-            } => {
-                let extra: Vec<&Path> = workspace_pkg_dirs.iter().map(|p| p.as_path()).collect();
-                pm::clear_bundler_caches(consumer_dir, &extra);
-                pm::touch_vite_configs(consumer_dir, workspace_pkg_dirs);
-            }
-            PostSwapAction::Notify { on_swap } => {
-                on_swap(&actually_changed);
-            }
-        }
+        spinner.stop(format!("Repacked {}", style(repacked.join(", ")).cyan()));
+        on_repack(&repacked);
     }
 
     Ok(())
+}
+
+/// Repack one package into the store. Returns whether the packed bytes
+/// differed from what was already there.
+fn repack(
+    entry: &store::StoreEntry,
+    last_hashes: &mut std::collections::HashMap<String, u64>,
+) -> Result<bool, String> {
+    let pkg_json_path = entry.source_dir.join("package.json");
+    let raw = std::fs::read_to_string(&pkg_json_path)
+        .map_err(|e| format!("could not read {}: {e}", pkg_json_path.display()))?;
+    let pkg_json: pack::PublishPackageJson = serde_json::from_str(&raw)
+        .map_err(|e| format!("could not parse {}: {e}", pkg_json_path.display()))?;
+
+    let tarball = pack::pack(&entry.source_dir, &pkg_json)
+        .map_err(|e| format!("failed to pack {}: {e}", entry.name))?;
+
+    let hash = hash_bytes(&tarball);
+    if last_hashes.get(&entry.name) == Some(&hash) {
+        return Ok(false);
+    }
+    last_hashes.insert(entry.name.clone(), hash);
+
+    let version = pkg_json.version.as_deref().unwrap_or("0.0.0");
+    store::save(
+        &entry.name,
+        version,
+        &entry.source_dir,
+        &tarball,
+        &pkg_json.dependencies(),
+    )?;
+
+    Ok(true)
 }
 
 /// Determine which directories to watch for a package.

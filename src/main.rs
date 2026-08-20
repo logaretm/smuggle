@@ -1,12 +1,11 @@
 #![allow(clippy::collapsible_if)]
 
-mod backup;
-mod ci;
-mod dev;
-mod install;
+mod lockfile;
+mod net;
 mod pack;
-mod pm;
 mod publish;
+mod session;
+mod setup;
 mod store;
 mod watch;
 mod workspace;
@@ -15,45 +14,66 @@ use clap::{Parser, Subcommand};
 use console::style;
 use std::path::PathBuf;
 
+/// Hidden subcommands used to re-invoke ourselves under sudo for the steps
+/// that need root. Installing the daemon is the only one a user ever triggers,
+/// and only once.
+pub const DAEMON_INSTALL_CMD: &str = "__install-daemon";
+pub const DAEMON_REMOVE_CMD: &str = "__remove-daemon";
+
 #[derive(Parser)]
 #[command(
     name = "smuggle",
-    about = "Smuggle local npm packages into your projects — no symlinks, no lockfile pollution",
-    after_help = "By default, install/dev start a file watcher that blocks until you press ctrl-c.\nUse --once to swap packages and exit immediately (useful for scripts and non-interactive environments).\nUse --ci for CI pipelines (implies --all --once, emits NDJSON, writes GitHub Actions summary)."
+    about = "Hijack npm registry requests so your local packages are served instead",
+    after_help = "smuggle does not install anything. It intercepts registry traffic for the\npackages you select and serves your local copies, for as long as it runs.\nRun your own package manager's install while it is up.\n\nRun `smuggle setup` once before first use. It asks for sudo a single time to
+install a background daemon; nothing after that ever asks again."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Package name(s) to install (e.g. `smuggle @scope/pkg`)
+    /// Package name(s) to hijack (e.g. `smuggle @scope/pkg`)
     names: Vec<String>,
 
     /// Path to the consumer project (defaults to current directory)
     #[arg(short, long, global = true)]
     path: Option<PathBuf>,
 
-    /// Skip interactive prompts and select all matching packages automatically
+    /// Skip interactive prompts and select all matching packages
     #[arg(long, global = true)]
     all: bool,
 
-    /// Swap packages once and exit immediately (without starting the file watcher)
-    #[arg(long, global = true)]
-    once: bool,
+    /// Log every request the proxy handles, not just hijacked ones
+    #[arg(long, short, global = true)]
+    verbose: bool,
 
-    /// CI mode: implies --all --once, emits NDJSON events to stdout, writes GitHub Actions job summary
-    #[arg(long, global = true)]
-    ci: bool,
+    /// Registry URL to intercept on top of the ones npm reports. Repeatable.
+    #[arg(long = "registry", global = true)]
+    registries: Vec<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pack and register a local package for later use (non-blocking, exits after packing)
+    /// Pack and register a local package so it can be hijacked (non-blocking)
     Publish {
         /// Path to the package directory (defaults to current directory)
         #[arg(short, long)]
         path: Option<PathBuf>,
 
         /// In a workspace, publish all non-private packages (skip interactive selection)
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Hijack registered packages until ctrl-c. This is what bare `smuggle` runs.
+    Hijack {
+        /// Package name(s) to hijack. Defaults to registered packages the project depends on.
+        names: Vec<String>,
+
+        /// Path to the consumer project (defaults to current directory)
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+
+        /// Skip interactive prompts and select all matching packages
         #[arg(long)]
         all: bool,
     },
@@ -71,139 +91,159 @@ enum Commands {
         all: bool,
     },
 
-    /// Swap registered packages into node_modules (blocks with file watcher unless --once is passed)
-    Install {
-        /// Package name(s) to install. If not in package.json, they will be injected temporarily.
-        names: Vec<String>,
+    /// Install the local CA that lets smuggle intercept registry traffic (one-time, non-blocking)
+    Setup,
 
-        /// Path to the consumer project (defaults to current directory)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
+    /// Remove the local CA, the shell profile entry, and any leftover registry redirect
+    Cleanup,
 
-        /// Skip interactive prompts and select all matching packages
+    /// Run the interception proxy in the foreground until ctrl-c (needs sudo)
+    Proxy {
+        /// Port to listen on (default 443)
+        #[arg(long, default_value_t = 443)]
+        port: u16,
+
+        /// Loopback address to listen on (default 127.0.0.2, added to lo0 while running)
         #[arg(long)]
-        all: bool,
+        listen: Option<std::net::IpAddr>,
 
-        /// Swap packages and exit immediately (don't start the file watcher)
+        /// Listen without editing /etc/hosts. Nothing is intercepted; clients
+        /// have to be pointed at the proxy explicitly.
         #[arg(long)]
-        once: bool,
+        no_redirect: bool,
 
-        /// Add new packages as devDependencies instead of dependencies
+        /// Log every request that passes through
         #[arg(long)]
-        dev: bool,
+        verbose: bool,
+
+        /// Package answered from the local store instead of upstream. Repeatable.
+        #[arg(long = "hijack")]
+        hijack: Vec<String>,
     },
 
-    /// Swap local packages and run your dev server (blocks until ctrl-c)
-    Dev {
-        /// Path to the consumer project (defaults to current directory)
-        #[arg(short, long)]
-        path: Option<PathBuf>,
-
-        /// Skip interactive prompts and select all matching packages
+    /// Run the root daemon. Internal: started by launchd, never by hand.
+    #[command(hide = true)]
+    Daemon {
+        /// The user allowed to drive the daemon over its control socket.
         #[arg(long)]
-        all: bool,
-
-        /// Kill and restart the dev server on each package change (instead of relying on HMR)
-        #[arg(long)]
-        restart: bool,
-
-        /// Dev server command (auto-detected from package.json "dev" script if omitted)
-        #[arg(last = true)]
-        command: Vec<String>,
+        owner_uid: u32,
     },
+
+    /// Install the daemon. Internal: re-invoked under sudo by setup.
+    #[command(name = DAEMON_INSTALL_CMD, hide = true)]
+    InstallDaemon,
+
+    /// Remove the daemon. Internal: re-invoked under sudo by cleanup.
+    #[command(name = DAEMON_REMOVE_CMD, hide = true)]
+    RemoveDaemon,
 }
 
 fn main() {
     let cli = Cli::parse();
+    let all = cli.all;
 
-    let ci = cli.ci;
-    let all = cli.all || ci;
-    let once = cli.once || ci;
+    // A proxy killed with SIGKILL cannot clean up after itself, so every
+    // invocation checks for a redirect whose owner is gone before doing
+    // anything that might route through it.
+    if !matches!(
+        cli.command,
+        Some(
+            Commands::Daemon { .. }
+                | Commands::InstallDaemon
+                | Commands::RemoveDaemon
+                | Commands::Cleanup
+        )
+    ) {
+        setup::reconcile_stale_redirect();
+    }
 
-    let mut summary = ci::SummaryCollector::new();
+    let cwd = || std::env::current_dir().expect("current directory is readable");
 
     let result: Result<(), String> = match cli.command {
         Some(Commands::Publish { path, all: pub_all }) => {
-            let pkg_dir = path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            publish::cmd_publish(&pkg_dir, pub_all || all, ci, &mut summary)
+            publish::cmd_publish(&path.unwrap_or_else(cwd), pub_all || all)
         }
+        Some(Commands::Hijack {
+            names,
+            path,
+            all: hijack_all,
+        }) => session::run(
+            &path.or(cli.path).unwrap_or_else(cwd),
+            hijack_all || all,
+            &names,
+            &cli.registries,
+            cli.verbose,
+        ),
         Some(Commands::List) => {
-            cmd_list(ci);
+            cmd_list();
             Ok(())
         }
         Some(Commands::Unpublish {
             name,
             all: unpub_all,
         }) => cmd_unpublish(name.as_deref(), unpub_all || all),
-        Some(Commands::Install {
-            names,
-            path,
-            all: inst_all,
-            once: inst_once,
-            dev,
+        Some(Commands::Setup) => setup::cmd_setup(),
+        Some(Commands::Cleanup) => setup::cmd_cleanup(),
+        Some(Commands::Daemon { owner_uid }) => net::daemon::run(owner_uid),
+        Some(Commands::InstallDaemon) => setup::cmd_install_daemon(),
+        Some(Commands::RemoveDaemon) => setup::cmd_remove_daemon(),
+        Some(Commands::Proxy {
+            port,
+            listen,
+            no_redirect,
+            verbose,
+            hijack,
         }) => {
-            let consumer_dir = path
-                .or(cli.path)
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
-            let all = inst_all || all;
-            let once = inst_once || once;
-            install::cmd_install(&consumer_dir, all, once, ci, dev, &names, &mut summary)
+            let sources: Vec<String> = if cli.registries.is_empty() {
+                net::DEFAULT_REGISTRIES
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect()
+            } else {
+                cli.registries.clone()
+            };
+            let registries = match sources
+                .iter()
+                .map(|url| net::Registry::parse(url))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    let _ = cliclack::outro(format!("{}", style(&e).red()));
+                    std::process::exit(1);
+                }
+            };
+            net::proxy::run(net::proxy::Config {
+                listen_ip: listen.unwrap_or_else(|| {
+                    net::LISTEN_IP
+                        .parse()
+                        .expect("LISTEN_IP is a valid address")
+                }),
+                port,
+                registries,
+                no_redirect,
+                verbose,
+                hijack,
+            })
         }
-        Some(Commands::Dev {
-            path,
+        // bare `smuggle` or `smuggle <names>` is the same as `smuggle hijack`
+        None => session::run(
+            &cli.path.unwrap_or_else(cwd),
             all,
-            restart,
-            command,
-        }) => {
-            let consumer_dir = path
-                .or(cli.path)
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
-            let all = all || cli.all;
-            if let Err(e) = dev::cmd_dev(&consumer_dir, all, restart, &command) {
-                let _ = cliclack::outro(format!("{}", style(e).red()));
-                std::process::exit(1);
-            }
-            Ok(())
-        }
-        None => {
-            // bare `smuggle` or `smuggle <names>` = `smuggle install`
-            let consumer_dir = cli.path.unwrap_or_else(|| std::env::current_dir().unwrap());
-            install::cmd_install(
-                &consumer_dir,
-                all,
-                once,
-                ci,
-                false,
-                &cli.names,
-                &mut summary,
-            )
-        }
+            &cli.names,
+            &cli.registries,
+            cli.verbose,
+        ),
     };
 
-    // Write GitHub Actions job summary if applicable
-    if ci {
-        summary.write_github_summary();
-    }
-
     if let Err(e) = result {
-        if ci {
-            ci::emit(&ci::Event::Error { message: &e });
-        } else {
-            let _ = cliclack::outro(format!("{}", style(e).red()));
-        }
+        let _ = cliclack::outro(format!("{}", style(e).red()));
         std::process::exit(1);
     }
 }
 
-fn cmd_list(ci: bool) {
+fn cmd_list() {
     let packages = store::list();
-
-    if ci {
-        if let Ok(out) = serde_json::to_string(&packages) {
-            println!("{out}");
-        }
-        return;
-    }
 
     if packages.is_empty() {
         let _ = cliclack::log::info(format!(
@@ -232,16 +272,11 @@ fn cmd_unpublish(name: Option<&str>, all: bool) -> Result<(), String> {
 
     let names = if let Some(n) = name {
         vec![n.to_string()]
+    } else if packages.is_empty() {
+        return Err("no packages registered".to_string());
     } else if all {
-        if packages.is_empty() {
-            return Err("no packages registered".to_string());
-        }
         packages.iter().map(|e| e.name.clone()).collect()
     } else {
-        if packages.is_empty() {
-            return Err("no packages registered".to_string());
-        }
-
         let mut prompt = cliclack::multiselect("Select packages to remove");
         for (i, entry) in packages.iter().enumerate() {
             let label = format!("{} @ {}", entry.name, entry.version);

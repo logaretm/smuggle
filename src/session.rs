@@ -51,11 +51,11 @@ pub fn start(
         .try_clone()
         .map_err(|e| format!("could not use the daemon socket: {e}"))?;
 
-    let request = serde_json::to_string(&control::Register {
+    let request = serde_json::to_string(&control::Request::Register {
+        version: control::version(),
         packages: packages.to_vec(),
         registries: registries.to_vec(),
         verbose,
-        version: control::version(),
     })
     .map_err(|e| format!("could not encode the request: {e}"))?;
 
@@ -77,7 +77,7 @@ pub fn start(
     match serde_json::from_str::<control::Reply>(line.trim()) {
         Ok(control::Reply::Ok) => {}
         Ok(control::Reply::Error { message }) => return Err(message),
-        Ok(control::Reply::Log { .. }) | Err(_) => {
+        Ok(_) | Err(_) => {
             return Err("unexpected reply from the daemon".into());
         }
     }

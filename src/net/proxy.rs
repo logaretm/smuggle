@@ -25,8 +25,46 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 
+use super::control::Event;
 use super::{Registry, ca, hijack, hosts, loopback};
 use crate::store;
+
+/// Reports what the proxy did, either as JSON for the daemon to relay or as a
+/// formatted line for someone running `smuggle proxy` directly.
+#[derive(Clone, Copy)]
+struct Reporter {
+    structured: bool,
+}
+
+impl Reporter {
+    fn emit(&self, event: Event) {
+        if self.structured {
+            if let Ok(line) = serde_json::to_string(&event) {
+                println!("{line}");
+                // The daemon reads this pipe line by line; without a flush the
+                // events would sit in the buffer until it filled.
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            return;
+        }
+
+        match event {
+            Event::Error { ref message } => {
+                let _ = cliclack::log::warning(message);
+            }
+            Event::Passthrough { .. } => {
+                let _ = cliclack::log::remark(event.to_line());
+            }
+            Event::Listening { .. } => {
+                let _ = cliclack::log::success(event.to_line());
+            }
+            _ => {
+                let _ = cliclack::log::success(event.to_line());
+            }
+        }
+    }
+}
 
 /// Hop-by-hop headers, which must not be forwarded across a proxy hop.
 /// See RFC 9110 section 7.6.1.
@@ -59,6 +97,9 @@ pub struct Config {
     pub verbose: bool,
     /// Packages answered from the local store instead of upstream.
     pub hijack: Vec<String>,
+    /// Emit machine-readable events on stdout instead of formatted lines. The
+    /// daemon uses this so a session can render the facts itself.
+    pub events: bool,
 }
 
 /// Run the proxy in the foreground until interrupted. Requires root, both to
@@ -141,6 +182,9 @@ async fn serve(
         .await
         .map_err(|e| format!("failed to bind {addr}: {e}"))?;
 
+    let reporter = Reporter {
+        structured: config.events,
+    };
     let tls = Arc::new(tls_acceptor()?);
     let client = Arc::new(upstream_client(upstreams));
     let hijacked: Arc<std::collections::HashSet<String>> =
@@ -165,11 +209,10 @@ async fn serve(
             &config.listen_ip.to_string(),
             registry_hosts,
         )?;
-        let _ = cliclack::log::success(format!(
-            "Intercepting {} on {}",
-            style(registry_hosts.join(", ")).cyan(),
-            style(addr).dim(),
-        ));
+        reporter.emit(Event::Listening {
+            hosts: registry_hosts.to_vec(),
+            addr: addr.to_string(),
+        });
     }
 
     let verbose = config.verbose;
@@ -187,10 +230,11 @@ async fn serve(
                 let mounts = mounts.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_connection(stream, tls, client, hijacked, mounts, verbose).await
+                        handle_connection(stream, tls, client, hijacked, mounts, reporter, verbose)
+                            .await
                     {
                         if verbose {
-                            let _ = cliclack::log::warning(e);
+                            reporter.emit(Event::Error { message: e });
                         }
                     }
                 });
@@ -225,6 +269,7 @@ async fn handle_connection(
     client: Arc<UpstreamClient>,
     hijacked: Arc<std::collections::HashSet<String>>,
     mounts: Arc<HashMap<String, Registry>>,
+    reporter: Reporter,
     verbose: bool,
 ) -> Result<(), String> {
     let stream = tls
@@ -247,7 +292,7 @@ async fn handle_connection(
         let sni = sni.clone();
         let hijacked = hijacked.clone();
         let mounts = mounts.clone();
-        async move { forward(req, sni, client, hijacked, mounts, verbose).await }
+        async move { forward(req, sni, client, hijacked, mounts, reporter, verbose).await }
     });
 
     hyper::server::conn::http1::Builder::new()
@@ -263,6 +308,7 @@ async fn forward(
     client: Arc<UpstreamClient>,
     hijacked: Arc<std::collections::HashSet<String>>,
     mounts: Arc<HashMap<String, Registry>>,
+    reporter: Reporter,
     verbose: bool,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     let path = req
@@ -291,11 +337,10 @@ async fn forward(
     if let Some((name, Kind::Tarball)) = &target {
         return Ok(match store::load_tarball(name) {
             Ok(tarball) => {
-                let _ = cliclack::log::success(format!(
-                    "served {} from the store ({} bytes)",
-                    style(name).cyan(),
-                    tarball.len(),
-                ));
+                reporter.emit(Event::Served {
+                    package: name.clone(),
+                    bytes: tarball.len(),
+                });
                 tarball_response(tarball)
             }
             Err(e) => bad_gateway(&format!("no packed tarball for {name}: {e}")),
@@ -337,14 +382,14 @@ async fn forward(
         );
     }
 
-    if verbose {
-        let _ = cliclack::log::remark(format!("-> {} {}", parts.method, parts.uri));
-    }
-
     match client.request(Request::from_parts(parts, body)).await {
         Ok(upstream) => {
-            if verbose {
-                let _ = cliclack::log::remark(format!("<- {} {host}{path}", upstream.status()));
+            if verbose && target.is_none() {
+                reporter.emit(Event::Passthrough {
+                    host: host.clone(),
+                    path: path.clone(),
+                    status: upstream.status().as_u16(),
+                });
             }
             let (mut parts, body) = upstream.into_parts();
             for name in HOP_BY_HOP {
@@ -353,7 +398,7 @@ async fn forward(
 
             match target {
                 Some((name, kind)) if parts.status.is_success() => {
-                    Ok(rewrite_response(parts, body, &name, kind).await)
+                    Ok(rewrite_response(parts, body, &name, kind, reporter).await)
                 }
                 _ => Ok(Response::from_parts(parts, body.boxed())),
             }
@@ -377,6 +422,7 @@ async fn rewrite_response(
     body: Incoming,
     name: &str,
     kind: Kind,
+    reporter: Reporter,
 ) -> Response<ProxyBody> {
     let tarball = match store::load_tarball(name) {
         Ok(t) => t,
@@ -400,15 +446,15 @@ async fn rewrite_response(
         Err(e) => return bad_gateway(&format!("could not rewrite the {name} document: {e}")),
     };
 
-    let _ = cliclack::log::success(format!(
-        "rewrote {} integrity for {}",
-        match kind {
+    reporter.emit(Event::Rewrote {
+        package: name.to_string(),
+        document: match kind {
             Kind::Packument => "packument",
             Kind::Manifest => "manifest",
             Kind::Tarball => "tarball",
-        },
-        style(name).cyan(),
-    ));
+        }
+        .to_string(),
+    });
 
     // Re-encoding changes the length, and any upstream encoding no longer
     // describes the body we are sending.

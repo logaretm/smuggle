@@ -40,8 +40,7 @@ impl Registration {
         })
         .map_err(|e| format!("could not encode the request: {e}"))?;
 
-        writeln!(&self.stream, "{request}")
-            .map_err(|e| format!("could not reach the daemon: {e}"))
+        writeln!(&self.stream, "{request}").map_err(|e| format!("could not reach the daemon: {e}"))
     }
 }
 

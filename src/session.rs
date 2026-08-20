@@ -23,7 +23,25 @@ use crate::{lockfile, pack, store, watch};
 /// A registration with the daemon. Dropping it closes the connection, which
 /// is how the daemon learns the session is over and takes the redirect down.
 pub struct Registration {
-    _stream: UnixStream,
+    stream: UnixStream,
+    registries: Vec<String>,
+}
+
+impl Registration {
+    /// Change what this session hijacks, without dropping the connection.
+    /// Reconnecting would leave the daemon briefly with no sessions, which
+    /// would tear the proxy down and rebuild it on every change.
+    pub fn set_packages(&mut self, packages: &[String]) -> Result<(), String> {
+        let request = serde_json::to_string(&control::Request::Register {
+            version: control::version(),
+            packages: packages.to_vec(),
+            registries: self.registries.clone(),
+            verbose: false,
+        })
+        .map_err(|e| format!("could not encode the request: {e}"))?;
+
+        writeln!(&self.stream, "{request}").map_err(|e| format!("could not reach the daemon: {e}"))
+    }
 }
 
 /// Register with the daemon so it hijacks `packages` for as long as we live.
@@ -116,7 +134,10 @@ pub fn start_with_sink(
         }
     });
 
-    Ok(Registration { _stream: stream })
+    Ok(Registration {
+        stream,
+        registries: registries.to_vec(),
+    })
 }
 
 /// Ask npm which registries this project actually resolves through.

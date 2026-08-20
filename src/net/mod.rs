@@ -1,6 +1,9 @@
 pub mod ca;
+pub mod control;
+pub mod daemon;
 pub mod hijack;
 pub mod hosts;
+pub mod launchd;
 pub mod loopback;
 pub mod proxy;
 pub mod trust;

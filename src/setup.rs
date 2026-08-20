@@ -1,6 +1,6 @@
 use console::style;
 
-use crate::net::{ca, hosts, trust};
+use crate::net::{ca, hosts, launchd, trust};
 
 /// Install the machine trust that lets the proxy terminate TLS for registry
 /// hosts. Everything here is inert on its own: nothing is intercepted until
@@ -49,8 +49,10 @@ pub fn cmd_setup() -> Result<(), String> {
         style(profile.display()).dim(),
     ));
 
+    install_daemon()?;
+
     if trust::env_var_active() {
-        let _ = cliclack::outro("Setup complete.");
+        let _ = cliclack::outro("Setup complete. No further sudo prompts.");
     } else {
         let _ = cliclack::outro(format!(
             "Setup complete. Restart your shell (or {}) so npm picks up the CA.",
@@ -61,19 +63,80 @@ pub fn cmd_setup() -> Result<(), String> {
     Ok(())
 }
 
+/// Install the root daemon. This is the only step that needs sudo, and it only
+/// happens here: once it is running, a session registers over its socket and
+/// never escalates.
+fn install_daemon() -> Result<(), String> {
+    let exe =
+        std::env::current_exe().map_err(|e| format!("could not locate the smuggle binary: {e}"))?;
+
+    if is_root() {
+        launchd::install(&exe, invoking_uid())?;
+        launchd::unload()?;
+        launchd::load()?;
+    } else {
+        let _ = cliclack::log::remark(
+            "Installing the background daemon needs sudo, once. Sessions will not ask again.",
+        );
+        let status = std::process::Command::new("sudo")
+            .arg(&exe)
+            .arg(crate::DAEMON_INSTALL_CMD)
+            .status()
+            .map_err(|e| format!("failed to run sudo: {e}"))?;
+
+        if !status.success() {
+            return Err("failed to install the smuggle daemon".into());
+        }
+    }
+
+    let _ = cliclack::log::success(format!(
+        "Installed the background daemon ({})",
+        style(launchd::LABEL).dim()
+    ));
+    Ok(())
+}
+
+/// The user the daemon should answer to. Under sudo this is the invoking user,
+/// not root.
+pub fn invoking_uid() -> u32 {
+    std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| unsafe { libc::getuid() })
+}
+
+/// Root half of `setup`, re-invoked under sudo.
+pub fn cmd_install_daemon() -> Result<(), String> {
+    if !is_root() {
+        return Err("this command must run as root".into());
+    }
+    let exe =
+        std::env::current_exe().map_err(|e| format!("could not locate the smuggle binary: {e}"))?;
+    launchd::install(&exe, invoking_uid())?;
+    launchd::unload()?;
+    launchd::load()
+}
+
+/// Root half of `cleanup`, re-invoked under sudo. Also clears the redirect,
+/// so teardown is a single escalation.
+pub fn cmd_remove_daemon() -> Result<(), String> {
+    if !is_root() {
+        return Err("this command must run as root".into());
+    }
+    hosts::remove()?;
+    launchd::remove()
+}
+
 /// Undo everything `smuggle setup` did, plus any redirect a crashed proxy left
 /// behind. Safe to run at any time, including when nothing is installed.
 pub fn cmd_cleanup() -> Result<(), String> {
     let _ = cliclack::intro(style(" smuggle cleanup ").on_cyan().black());
 
-    match hosts::read_block() {
-        Some(_) => {
-            clear_hosts_as_root()?;
-            let _ = cliclack::log::success("Removed the registry redirect from /etc/hosts");
-        }
-        None => {
-            let _ = cliclack::log::info("No registry redirect in /etc/hosts");
-        }
+    if launchd::is_installed() || hosts::read_block().is_some() {
+        remove_daemon_as_root()?;
+        let _ = cliclack::log::success("Removed the background daemon and any registry redirect");
+    } else {
+        let _ = cliclack::log::info("No background daemon installed");
     }
 
     if trust::is_in_keychain() {
@@ -108,23 +171,23 @@ pub fn cmd_cleanup() -> Result<(), String> {
 /// Editing /etc/hosts needs root. Re-invoke ourselves under sudo for that one
 /// step rather than asking the user to run all of cleanup as root, which would
 /// touch the wrong keychain and the wrong shell profile.
-fn clear_hosts_as_root() -> Result<(), String> {
+fn remove_daemon_as_root() -> Result<(), String> {
     if is_root() {
-        return hosts::remove();
+        return cmd_remove_daemon();
     }
 
     let exe =
         std::env::current_exe().map_err(|e| format!("could not locate the smuggle binary: {e}"))?;
 
-    let _ = cliclack::log::remark("Removing the /etc/hosts redirect needs sudo");
+    let _ = cliclack::log::remark("Removing the daemon needs sudo");
     let status = std::process::Command::new("sudo")
         .arg(exe)
-        .arg(crate::HOSTS_CLEAR_CMD)
+        .arg(crate::DAEMON_REMOVE_CMD)
         .status()
         .map_err(|e| format!("failed to run sudo: {e}"))?;
 
     if !status.success() {
-        return Err("failed to clear the /etc/hosts redirect".into());
+        return Err("failed to remove the smuggle daemon".into());
     }
     Ok(())
 }
@@ -153,7 +216,7 @@ pub fn reconcile_stale_redirect() {
         block.hosts.join(", "),
         block.pid,
     ));
-    if clear_hosts_as_root().is_err() {
+    if remove_daemon_as_root().is_err() {
         let _ = cliclack::log::warning(format!(
             "Could not remove it. Run {} to clear it.",
             style("smuggle cleanup").cyan()

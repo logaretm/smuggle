@@ -59,10 +59,6 @@ pub struct Config {
     pub verbose: bool,
     /// Packages answered from the local store instead of upstream.
     pub hijack: Vec<String>,
-    /// Shut down when stdin reaches EOF. The proxy runs as root, so its
-    /// unprivileged parent cannot signal it; closing the pipe is how a session
-    /// tells it to stop, and it also covers the parent being killed outright.
-    pub exit_on_parent_close: bool,
 }
 
 /// Run the proxy in the foreground until interrupted. Requires root, both to
@@ -177,7 +173,7 @@ async fn serve(
     }
 
     let verbose = config.verbose;
-    let shutdown = shutdown_signal(config.exit_on_parent_close);
+    let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
     loop {
@@ -205,7 +201,7 @@ async fn serve(
     Ok(())
 }
 
-async fn shutdown_signal(on_parent_close: bool) {
+async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut term = match signal(SignalKind::terminate()) {
@@ -220,22 +216,6 @@ async fn shutdown_signal(on_parent_close: bool) {
     tokio::select! {
         _ = term.recv() => {}
         _ = int.recv() => {}
-        _ = parent_closed(), if on_parent_close => {}
-    }
-}
-
-/// Resolves when stdin reaches EOF, which happens when the parent session
-/// drops its end of the pipe or dies.
-async fn parent_closed() {
-    use tokio::io::AsyncReadExt;
-
-    let mut stdin = tokio::io::stdin();
-    let mut scratch = [0u8; 64];
-    loop {
-        match stdin.read(&mut scratch).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
     }
 }
 

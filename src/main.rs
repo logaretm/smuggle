@@ -14,15 +14,18 @@ use clap::{Parser, Subcommand};
 use console::style;
 use std::path::PathBuf;
 
-/// Hidden subcommand used to re-invoke ourselves under sudo for the one step
-/// that needs root: editing the /etc/hosts redirect.
-pub const HOSTS_CLEAR_CMD: &str = "__hosts-clear";
+/// Hidden subcommands used to re-invoke ourselves under sudo for the steps
+/// that need root. Installing the daemon is the only one a user ever triggers,
+/// and only once.
+pub const DAEMON_INSTALL_CMD: &str = "__install-daemon";
+pub const DAEMON_REMOVE_CMD: &str = "__remove-daemon";
 
 #[derive(Parser)]
 #[command(
     name = "smuggle",
     about = "Hijack npm registry requests so your local packages are served instead",
-    after_help = "smuggle does not install anything. It intercepts registry traffic for the\npackages you select and serves your local copies, for as long as it runs.\nRun your own package manager's install while it is up.\n\nRun `smuggle setup` once before first use."
+    after_help = "smuggle does not install anything. It intercepts registry traffic for the\npackages you select and serves your local copies, for as long as it runs.\nRun your own package manager's install while it is up.\n\nRun `smuggle setup` once before first use. It asks for sudo a single time to
+install a background daemon; nothing after that ever asks again."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -116,16 +119,23 @@ enum Commands {
         /// Package answered from the local store instead of upstream. Repeatable.
         #[arg(long = "hijack")]
         hijack: Vec<String>,
-
-        /// Shut down when stdin closes. Used by a session to stop the proxy it
-        /// started, since it cannot signal a root process.
-        #[arg(long, hide = true)]
-        exit_on_parent_close: bool,
     },
 
-    /// Clear the /etc/hosts redirect. Internal: re-invoked under sudo by cleanup.
-    #[command(name = HOSTS_CLEAR_CMD, hide = true)]
-    HostsClear,
+    /// Run the root daemon. Internal: started by launchd, never by hand.
+    #[command(hide = true)]
+    Daemon {
+        /// The user allowed to drive the daemon over its control socket.
+        #[arg(long)]
+        owner_uid: u32,
+    },
+
+    /// Install the daemon. Internal: re-invoked under sudo by setup.
+    #[command(name = DAEMON_INSTALL_CMD, hide = true)]
+    InstallDaemon,
+
+    /// Remove the daemon. Internal: re-invoked under sudo by cleanup.
+    #[command(name = DAEMON_REMOVE_CMD, hide = true)]
+    RemoveDaemon,
 }
 
 fn main() {
@@ -135,7 +145,15 @@ fn main() {
     // A proxy killed with SIGKILL cannot clean up after itself, so every
     // invocation checks for a redirect whose owner is gone before doing
     // anything that might route through it.
-    if !matches!(cli.command, Some(Commands::HostsClear | Commands::Cleanup)) {
+    if !matches!(
+        cli.command,
+        Some(
+            Commands::Daemon { .. }
+                | Commands::InstallDaemon
+                | Commands::RemoveDaemon
+                | Commands::Cleanup
+        )
+    ) {
         setup::reconcile_stale_redirect();
     }
 
@@ -166,14 +184,15 @@ fn main() {
         }) => cmd_unpublish(name.as_deref(), unpub_all || all),
         Some(Commands::Setup) => setup::cmd_setup(),
         Some(Commands::Cleanup) => setup::cmd_cleanup(),
-        Some(Commands::HostsClear) => net::hosts::remove(),
+        Some(Commands::Daemon { owner_uid }) => net::daemon::run(owner_uid),
+        Some(Commands::InstallDaemon) => setup::cmd_install_daemon(),
+        Some(Commands::RemoveDaemon) => setup::cmd_remove_daemon(),
         Some(Commands::Proxy {
             port,
             listen,
             no_redirect,
             verbose,
             hijack,
-            exit_on_parent_close,
         }) => {
             let sources: Vec<String> = if cli.registries.is_empty() {
                 net::DEFAULT_REGISTRIES
@@ -205,7 +224,6 @@ fn main() {
                 no_redirect,
                 verbose,
                 hijack,
-                exit_on_parent_close,
             })
         }
         // bare `smuggle` or `smuggle <names>` is the same as `smuggle hijack`

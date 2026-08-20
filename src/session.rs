@@ -7,7 +7,9 @@
 //! without any further coordination: the store is the control plane.
 
 use console::style;
-use std::process::{Child, Command, Stdio};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -15,22 +17,81 @@ use std::path::Path;
 
 use std::collections::HashMap;
 
-use crate::net::hijack;
+use crate::net::{control, hijack};
 use crate::{lockfile, pack, store, watch};
 
-/// A running proxy. Dropping this closes the pipe the proxy is reading, which
-/// is how it learns to shut down and undo the redirect.
-pub struct Proxy {
-    child: Child,
+/// A registration with the daemon. Dropping it closes the connection, which
+/// is how the daemon learns the session is over and takes the redirect down.
+pub struct Registration {
+    _stream: UnixStream,
 }
 
-impl Drop for Proxy {
-    fn drop(&mut self) {
-        // Closing stdin is the shutdown signal. The proxy runs as root, so an
-        // unprivileged parent cannot signal it directly.
-        drop(self.child.stdin.take());
-        let _ = self.child.wait();
+/// Register with the daemon so it hijacks `packages` for as long as we live.
+pub fn start(
+    packages: &[String],
+    registries: &[String],
+    verbose: bool,
+) -> Result<Registration, String> {
+    let path = control::socket_path();
+    let stream = UnixStream::connect(&path).map_err(|e| {
+        if !crate::net::launchd::is_installed() {
+            "the smuggle daemon is not installed. Run `smuggle setup` first.".to_string()
+        } else if !crate::net::launchd::is_loaded() {
+            "the smuggle daemon is installed but not running. Run `smuggle setup` again."
+                .to_string()
+        } else {
+            format!(
+                "could not reach the smuggle daemon at {} ({e})",
+                path.display()
+            )
+        }
+    })?;
+
+    let mut writer = stream
+        .try_clone()
+        .map_err(|e| format!("could not use the daemon socket: {e}"))?;
+
+    let request = serde_json::to_string(&control::Register {
+        packages: packages.to_vec(),
+        registries: registries.to_vec(),
+        verbose,
+        version: control::version(),
+    })
+    .map_err(|e| format!("could not encode the request: {e}"))?;
+
+    writeln!(writer, "{request}").map_err(|e| format!("could not talk to the daemon: {e}"))?;
+
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|e| format!("could not use the daemon socket: {e}"))?,
+    );
+
+    // The first reply says whether we are registered; everything after it is
+    // proxy output to print.
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("the daemon closed the connection: {e}"))?;
+
+    match serde_json::from_str::<control::Reply>(line.trim()) {
+        Ok(control::Reply::Ok) => {}
+        Ok(control::Reply::Error { message }) => return Err(message),
+        Ok(control::Reply::Log { .. }) | Err(_) => {
+            return Err("unexpected reply from the daemon".into());
+        }
     }
+
+    std::thread::spawn(move || {
+        for line in reader.lines().map_while(Result::ok) {
+            if let Ok(control::Reply::Log { line }) = serde_json::from_str::<control::Reply>(&line)
+            {
+                println!("{line}");
+            }
+        }
+    });
+
+    Ok(Registration { _stream: stream })
 }
 
 /// Ask npm which registries this project actually resolves through.
@@ -65,64 +126,6 @@ pub fn detect_registries(consumer_dir: &Path) -> Vec<String> {
     found.sort();
     found.dedup();
     found
-}
-
-/// Start the proxy with `packages` hijacked, prompting for sudo if needed.
-pub fn start(packages: &[String], registries: &[String], verbose: bool) -> Result<Proxy, String> {
-    let exe =
-        std::env::current_exe().map_err(|e| format!("could not locate the smuggle binary: {e}"))?;
-
-    prime_sudo()?;
-
-    let mut command = Command::new("sudo");
-    command.arg("-n").arg(&exe).arg("proxy");
-    for name in packages {
-        command.arg("--hijack").arg(name);
-    }
-    for registry in registries {
-        command.arg("--registry").arg(registry);
-    }
-    if verbose {
-        command.arg("--verbose");
-    }
-    command
-        .arg("--exit-on-parent-close")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    let child = command
-        .spawn()
-        .map_err(|e| format!("failed to start the proxy: {e}"))?;
-
-    Ok(Proxy { child })
-}
-
-/// Ask for the sudo password once, up front, so the proxy itself can be
-/// launched with a piped stdin it will use only as a shutdown signal.
-fn prime_sudo() -> Result<(), String> {
-    let already_valid = Command::new("sudo")
-        .args(["-n", "true"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if already_valid {
-        return Ok(());
-    }
-
-    let _ = cliclack::log::remark("The proxy binds :443 and edits /etc/hosts, so it needs sudo");
-    let status = Command::new("sudo")
-        .arg("-v")
-        .status()
-        .map_err(|e| format!("failed to run sudo: {e}"))?;
-
-    if !status.success() {
-        return Err("sudo was declined".into());
-    }
-    Ok(())
 }
 
 /// Select packages and hold them hijacked until interrupted, repacking

@@ -56,6 +56,9 @@ pub fn remove_alias(ip: IpAddr) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    // Reads `ifconfig lo0`, which is a macOS interface name. CI runs on Linux,
+    // where the interface is `lo` and ifconfig may not be installed at all.
+    #[cfg(target_os = "macos")]
     #[test]
     fn primary_loopback_is_always_configured() {
         assert!(is_configured("127.0.0.1".parse().unwrap()));
